@@ -78,7 +78,7 @@ coarse answers. `Now` returns `time.Now()` rounded to the configured
 resolution and serves the cached value for half that long.
 
 ```go
-tc := timecache.New(timecache.Options{}.Round(time.Second))
+tc := timecache.New(timecache.Round(time.Second))
 
 now := tc.Now() // rounded to the second, cached for 500ms
 ```

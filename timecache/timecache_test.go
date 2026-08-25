@@ -18,7 +18,7 @@ func TestTime(t *testing.T) {
 
 func TestRounding(t *testing.T) {
 	t.Parallel()
-	ti := New(Options{}.Round(time.Minute * 5)).Now()
+	ti := New(Round(time.Minute * 5)).Now()
 
 	if ti.Minute()%5 != 0 {
 		t.Fatalf("time is not a 5 multiple")
@@ -29,7 +29,7 @@ func TestResolution(t *testing.T) {
 	t.Parallel()
 	const magicNumber = 3
 	const rounds = 700
-	ti := New(Options{}.Round(time.Millisecond * magicNumber))
+	ti := New(Round(time.Millisecond * magicNumber))
 
 	unique := 0
 	old := ti.Now().UnixMilli()
