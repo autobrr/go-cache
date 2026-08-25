@@ -33,6 +33,25 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestDefaultTTLWithoutConfiguredDefaultIsNoTTL(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool]()
+		defer c.Close()
+
+		it := c.SetItem(1, true, DefaultTTL)
+		if it.GetDuration() != NoTTL || !it.GetTime().IsZero() {
+			t.Fatalf("default TTL was not canonicalized to NoTTL: duration=%s deadline=%s", it.GetDuration(), it.GetTime())
+		}
+
+		synctest.Sleep(24 * time.Hour)
+		if value, ok := c.Get(1); !ok || !value {
+			t.Fatal("item stored without a configured default TTL expired")
+		}
+	})
+}
+
 func TestExpirations(t *testing.T) {
 	t.Parallel()
 

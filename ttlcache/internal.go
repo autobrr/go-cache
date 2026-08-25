@@ -13,14 +13,14 @@ func (c *Cache[K, V]) get(key K) (Item[V], bool) {
 
 // _g treats an entry past its deadline as missing: the sweep may lag, and a
 // read must not observe -- or resurrect -- an item that already timed out.
-// It reads the clock at most once, and not at all for NoTTL items.
+// It reads the monotonic clock at most once, and not at all for NoTTL items.
 func (c *Cache[K, V]) _g(key K) (Item[V], bool) {
 	v, ok := c.m[key]
 	if !ok {
 		return Item[V]{}, false
 	}
 
-	if !v.t.IsZero() && !v.t.After(time.Now()) {
+	if v.d != NoTTL && time.Until(v.t) <= 0 {
 		return Item[V]{}, false
 	}
 
@@ -28,56 +28,77 @@ func (c *Cache[K, V]) _g(key K) (Item[V], bool) {
 }
 
 // getRefresh returns the item stored under key and pushes its expiration
-// forward. The lookup and the write-back happen inside the same critical
-// section: reading under RLock and writing the copy back afterwards let a Set
-// that landed in between get overwritten by the stale copy.
+// forward. A refresh rechecks the item under the write lock before storing it:
+// writing the first read's copy would overwrite a Set that landed while the
+// lock was being upgraded.
 func (c *Cache[K, V]) getRefresh(key K) (Item[V], bool) {
 	c.l.RLock()
-	it, ok, needs := c.lookRefresh(key)
+	it, ok := c.m[key]
+	if !ok {
+		c.l.RUnlock()
+		return Item[V]{}, false
+	}
+	if it.d == NoTTL {
+		c.l.RUnlock()
+		return it, true
+	}
+
+	remaining := time.Until(it.t)
+	if remaining <= 0 {
+		c.l.RUnlock()
+		return Item[V]{}, false
+	}
+	needs := c.needsRefresh(it, remaining)
 	c.l.RUnlock()
 
 	if !needs {
 		return it, ok
 	}
+	return c.refresh(key)
+}
 
+// refresh completes the uncommon write-lock half of getRefresh. Keeping it
+// separate leaves the read-only hit path free of write-back bookkeeping.
+func (c *Cache[K, V]) refresh(key K) (Item[V], bool) {
 	c.l.Lock()
-	defer c.l.Unlock()
-
 	// the item may have been replaced or deleted while the lock was upgraded.
-	it, ok, needs = c.lookRefresh(key)
+	it, ok, needs := c.lookRefresh(key)
 	if !needs {
+		c.l.Unlock()
 		return it, ok
 	}
 
-	return c._s(key, it, time.Now()), true
+	it = c._s(key, it, time.Now())
+	c.l.Unlock()
+	return it, true
 }
 
 // lookRefresh reports the item under key, whether it is live, and whether it
-// needs its expiration pushed forward, reading the clock at most once -- and
-// not at all for misses and NoTTL items.
+// needs its expiration pushed forward, reading the monotonic clock at most
+// once -- and not at all for misses and NoTTL items.
 func (c *Cache[K, V]) lookRefresh(key K) (Item[V], bool, bool) {
 	it, ok := c.m[key]
 	if !ok {
 		return Item[V]{}, false, false
 	}
 
-	if it.t.IsZero() {
+	if it.d == NoTTL {
 		return it, true, false // NoTTL: never expires, never refreshes.
 	}
 
-	now := time.Now()
-	if !it.t.After(now) {
+	remaining := time.Until(it.t)
+	if remaining <= 0 {
 		return Item[V]{}, false, false // expired; see _g.
 	}
 
-	return it, true, c.needsRefresh(it, now)
+	return it, true, c.needsRefresh(it, remaining)
 }
 
 // needsRefresh reports whether a Get should push the item's expiration
 // forward. Refreshes are batched to the cache resolution, capped at half the
 // item's own TTL, so hot keys do not take the write lock on every read.
-func (c *Cache[K, V]) needsRefresh(it Item[V], now time.Time) bool {
-	if c.o.noUpdateTime || it.t.IsZero() {
+func (c *Cache[K, V]) needsRefresh(it Item[V], remaining time.Duration) bool {
+	if c.o.noUpdateTime {
 		return false
 	}
 
@@ -86,8 +107,7 @@ func (c *Cache[K, V]) needsRefresh(it Item[V], now time.Time) bool {
 		res = h
 	}
 
-	_, t := c.getDuration(it.d, now)
-	return t.Sub(it.t) > res
+	return it.d-remaining > res
 }
 
 // set stores it under key and hands any displaced value to the deallocation
