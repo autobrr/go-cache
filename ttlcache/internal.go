@@ -111,24 +111,19 @@ func (c *Cache[K, V]) _gos(key K, it Item[V]) (Item[V], bool) {
 	return c._s(key, it), true
 }
 
+// delete removes key and then runs the deallocation callback outside the
+// lock: a callback that calls back into the cache would otherwise deadlock
+// against the write lock held here.
 func (c *Cache[K, V]) delete(key K, reason DeallocationReason) {
-	var v Item[V]
 	c.l.Lock()
-	defer c.l.Unlock()
-
-	if c.deallocationFn != nil {
-		var ok bool
-		v, ok = c.m[key]
-		if !ok {
-			return
-		}
+	v, ok := c.m[key]
+	if !ok {
+		c.l.Unlock()
+		return
 	}
 
-	c.deleteUnsafe(key, v, reason)
-}
-
-func (c *Cache[K, V]) deleteUnsafe(key K, v Item[V], reason DeallocationReason) {
 	delete(c.m, key)
+	c.l.Unlock()
 
 	if c.deallocationFn != nil {
 		c.deallocationFn(key, v.v, reason)

@@ -23,6 +23,13 @@ type Cache[K comparable, V any] struct {
 	closed         bool
 }
 
+// deallocation carries a removed entry out of the critical section so its
+// callback can run after the lock is released.
+type deallocation[K comparable, V any] struct {
+	key   K
+	value V
+}
+
 type Item[V any] struct {
 	t time.Time
 	d time.Duration

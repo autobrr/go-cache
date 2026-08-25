@@ -366,6 +366,52 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 	}
 }
 
+func TestDeallocationReentrancy(t *testing.T) {
+	t.Parallel()
+
+	// The callback used to run under the write lock, so touching the cache
+	// from inside it deadlocked on both the Delete and the timeout path.
+	done := make(chan DeallocationReason, 2)
+	var c *Cache[int, int]
+	c = New[int, int](
+		SetDefaultTTL(100*time.Millisecond),
+		SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {
+			c.Get(key)
+			done <- reason
+		}),
+	)
+	defer c.Close()
+
+	c.Set(1, 1, NoTTL)
+	deleted := make(chan struct{})
+	go func() {
+		c.Delete(1)
+		close(deleted)
+	}()
+
+	select {
+	case <-deleted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Delete deadlocked running the deallocation callback")
+	}
+
+	c.Set(2, 2, DefaultTTL)
+
+	seen := make(map[DeallocationReason]bool)
+	for range 2 {
+		select {
+		case r := <-done:
+			seen[r] = true
+		case <-time.After(10 * time.Second):
+			t.Fatal("deallocation callback never fired; the expiration goroutine is likely deadlocked")
+		}
+	}
+
+	if !seen[ReasonDeleted] || !seen[ReasonTimedOut] {
+		t.Fatalf("expected both reasons, got: %v", seen)
+	}
+}
+
 func TestDeallocationFuncTypeMismatchPanics(t *testing.T) {
 	t.Parallel()
 

@@ -137,7 +137,9 @@ func DisableUpdateTime(val bool) Option {
 }
 
 // SetDeallocationFunc registers f to run whenever an item leaves the cache,
-// whether it timed out or was deleted.
+// whether it timed out or was deleted. f runs after the item is already gone
+// and outside the cache's lock, so it may call back into the cache; timeouts
+// invoke it on the expiration goroutine.
 //
 // K and V are inferred from f, so the call site never spells them out. Unlike
 // the other options this one cannot be checked at compile time: Options is not

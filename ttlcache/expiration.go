@@ -49,12 +49,15 @@ func stopTimer(t *time.Timer) {
 	}
 }
 
+// expire sweeps the map and removes every item whose time has passed. The
+// deallocation callbacks run after the lock is released so they may call back
+// into the cache; see delete.
 func (c *Cache[K, V]) expire() {
 	t := c.tc.Now()
 	var soon time.Time
+	var timedOut []deallocation[K, V]
 
 	c.l.Lock()
-	defer c.l.Unlock()
 	for k, v := range c.m {
 		if v.t.IsZero() {
 			continue
@@ -65,8 +68,15 @@ func (c *Cache[K, V]) expire() {
 			continue
 		}
 
-		c.deleteUnsafe(k, v, ReasonTimedOut)
+		delete(c.m, k)
+		if c.deallocationFn != nil {
+			timedOut = append(timedOut, deallocation[K, V]{key: k, value: v.v})
+		}
 	}
-
 	c.wake(soon) // wake-up feedback loop
+	c.l.Unlock()
+
+	for _, d := range timedOut {
+		c.deallocationFn(d.key, d.value, ReasonTimedOut)
+	}
 }
