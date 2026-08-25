@@ -8,6 +8,8 @@ import (
 )
 
 func (c *Cache[K, V]) startExpirations() {
+	defer close(c.done)
+
 	timer := time.NewTimer(1 * time.Second)
 	timer.Stop() // wasteful, but makes the loop cleaner because this is initialized.
 	defer timer.Stop()

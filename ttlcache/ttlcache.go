@@ -20,6 +20,7 @@ type Cache[K comparable, V any] struct {
 	res            time.Duration // refresh batching granularity; see SetTimerResolution.
 	next           time.Time     // earliest deadline of any stored item; guarded by l. Stale-early after deletes, never late.
 	ch             chan struct{} // coalesced wake signal for the expiration loop; see wake.
+	done           chan struct{} // closed when the expiration loop returns; Close waits on it.
 	m              map[K]Item[V]
 	deallocationFn DeallocationFunc[K, V]
 	closed         bool
@@ -71,9 +72,10 @@ func New[K comparable, V any](opts ...Option) *Cache[K, V] {
 	}
 
 	c := Cache[K, V]{
-		o:  options,
-		ch: make(chan struct{}, 1),
-		m:  make(map[K]Item[V]),
+		o:    options,
+		ch:   make(chan struct{}, 1),
+		done: make(chan struct{}),
+		m:    make(map[K]Item[V]),
 	}
 
 	if options.deallocationFunc != nil {
@@ -189,9 +191,13 @@ func (c *Cache[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
-// Close stops the expiration goroutine. Items stored after Close are kept but
-// never expire -- no sweeper is left to collect them -- so writers and
-// iterating bodies should be done before closing.
+// Close stops the expiration goroutine and waits for it to return, including
+// any deallocation callback it is running, so resources the callback uses can
+// be torn down safely once Close returns. Close must not be called from a
+// timeout deallocation callback: those run on the expiration goroutine, and
+// the wait would deadlock. Items stored after Close are kept but never
+// expire -- no sweeper is left to collect them -- so writers and iterating
+// bodies should be done before closing.
 func (c *Cache[K, V]) Close() {
 	c.close()
 }

@@ -187,16 +187,19 @@ func (c *Cache[K, V]) getkeys() []K {
 	return keys
 }
 
+// close stops the loop and waits for it to exit. The wait must happen after
+// the lock is released: the loop may need that lock to finish a sweep before
+// it can observe the closed channel.
 func (c *Cache[K, V]) close() {
 	c.l.Lock()
-	defer c.l.Unlock()
-
-	if c.closed {
-		return
-	}
-
+	already := c.closed
 	c.closed = true
-	close(c.ch)
+	if !already {
+		close(c.ch)
+	}
+	c.l.Unlock()
+
+	<-c.done
 }
 
 func (c *Cache[K, V]) getDuration(d time.Duration) (time.Duration, time.Time) {

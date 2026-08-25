@@ -747,6 +747,38 @@ func TestStoreOverExpiredDeallocatesTimedOut(t *testing.T) {
 	}
 }
 
+func TestCloseWaitsForExpirationGoroutine(t *testing.T) {
+	t.Parallel()
+
+	// Close's contract is that the loop -- including any timeout callback it
+	// is running -- has finished by the time it returns, so callers can tear
+	// down resources the callback uses.
+	entered := make(chan struct{})
+	finished := make(chan struct{})
+	var first atomic.Bool
+
+	c := New[int, int](
+		SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {
+			if first.CompareAndSwap(false, true) {
+				close(entered)
+				time.Sleep(100 * time.Millisecond)
+				close(finished)
+			}
+		}),
+	)
+
+	c.Set(0, 0, 5*time.Millisecond)
+	<-entered
+
+	c.Close()
+
+	select {
+	case <-finished:
+	default:
+		t.Fatal("Close returned while a timeout deallocation callback was still running")
+	}
+}
+
 func TestGetOrSet(t *testing.T) {
 	t.Parallel()
 	c := New[int, int](SetDefaultTTL(time.Minute))
