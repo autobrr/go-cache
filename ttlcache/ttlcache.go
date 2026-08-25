@@ -177,8 +177,9 @@ func (c *Cache[K, V]) Keys() iter.Seq[K] {
 // Unlike Get, iterating does not push expirations forward: ranging over the
 // cache to inspect it would otherwise slide every item's TTL.
 func (c *Cache[K, V]) All() iter.Seq2[K, V] {
+	keys := c.getkeys() // eager, so the snapshot matches the doc and Keys.
 	return func(yield func(K, V) bool) {
-		for _, k := range c.getkeys() {
+		for _, k := range keys {
 			it, ok := c.get(k) // c.get, not GetItem: observing must not refresh.
 			if !ok {
 				continue

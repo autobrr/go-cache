@@ -456,6 +456,27 @@ func TestIterationBodyMayTouchTheCache(t *testing.T) {
 	}
 }
 
+// The key snapshot must be taken when All is called, not when iteration
+// begins, matching Keys and the documentation.
+func TestAllSnapshotsAtCallTime(t *testing.T) {
+	t.Parallel()
+
+	c := New[int, int](SetDefaultTTL(time.Minute))
+	defer c.Close()
+
+	c.Set(1, 1, DefaultTTL)
+	it := c.All()
+	c.Set(2, 2, DefaultTTL) // stored after the snapshot
+
+	seen := maps.Collect(it)
+	if _, ok := seen[2]; ok {
+		t.Fatal("key stored after All() appeared in the snapshot")
+	}
+	if _, ok := seen[1]; !ok {
+		t.Fatal("missing key: 1")
+	}
+}
+
 // A key that leaves the cache between the snapshot and the body reaching it
 // must be skipped, not yielded with a zero value.
 func TestAllSkipsDepartedEntries(t *testing.T) {
