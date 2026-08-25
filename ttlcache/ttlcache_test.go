@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -32,136 +33,157 @@ func TestGet(t *testing.T) {
 
 func TestExpirations(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
-	defer c.Close()
-	for i := range 10 {
-		c.Set(i, true, DefaultTTL)
-	}
 
-	time.Sleep(1 * time.Second)
-
-	for i := range 10 {
-		if _, ok := c.Get(i); ok {
-			t.Fatalf("found key: %d", i)
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
+		defer c.Close()
+		for i := range 10 {
+			c.Set(i, true, DefaultTTL)
 		}
-	}
+
+		synctest.Sleep(1 * time.Second)
+
+		for i := range 10 {
+			if _, ok := c.Get(i); ok {
+				t.Fatalf("found key: %d", i)
+			}
+		}
+	})
 }
 
 func TestSwaps(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
-	defer c.Close()
-	for i := range 10 {
-		c.Set(i, true, DefaultTTL)
-	}
 
-	time.Sleep(1 * time.Second)
-	for i := range 10 {
-		if _, ok := c.Get(i); ok {
-			t.Fatalf("found key: %d", i)
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
+		defer c.Close()
+		for i := range 10 {
+			c.Set(i, true, DefaultTTL)
 		}
-	}
 
-	for i := 10; i < 20; i++ {
-		c.Set(i, true, DefaultTTL)
-		if _, ok := c.Get(i); !ok {
-			t.Fatalf("missing key: %d", i)
+		synctest.Sleep(1 * time.Second)
+		for i := range 10 {
+			if _, ok := c.Get(i); ok {
+				t.Fatalf("found key: %d", i)
+			}
 		}
-	}
+
+		for i := 10; i < 20; i++ {
+			c.Set(i, true, DefaultTTL)
+			if _, ok := c.Get(i); !ok {
+				t.Fatalf("missing key: %d", i)
+			}
+		}
+	})
 }
 
 func TestRetimer(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
-	defer c.Close()
-	for i := 1; i < 10; i++ {
-		c.Set(i, true, time.Duration(10-i)*100*time.Millisecond)
-	}
 
-	time.Sleep(2 * time.Second)
-	for i := 1; i < 10; i++ {
-		if _, ok := c.Get(i); ok {
-			t.Fatalf("found key: %d", i)
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
+		defer c.Close()
+		for i := 1; i < 10; i++ {
+			c.Set(i, true, time.Duration(10-i)*100*time.Millisecond)
 		}
-	}
+
+		synctest.Sleep(2 * time.Second)
+		for i := 1; i < 10; i++ {
+			if _, ok := c.Get(i); ok {
+				t.Fatalf("found key: %d", i)
+			}
+		}
+	})
 }
 
 func TestSchedule(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](SetDefaultTTL(1 * time.Second))
-	defer c.Close()
-	for i := 1; i < 10; i++ {
-		c.Set(i, true, time.Duration(i)*100*time.Millisecond)
-	}
 
-	time.Sleep(3 * time.Second)
-	for i := 1; i < 10; i++ {
-		if _, ok := c.Get(i); ok {
-			t.Fatalf("found key: %d", i)
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool](SetDefaultTTL(1 * time.Second))
+		defer c.Close()
+		for i := 1; i < 10; i++ {
+			c.Set(i, true, time.Duration(i)*100*time.Millisecond)
 		}
-	}
+
+		synctest.Sleep(3 * time.Second)
+		for i := 1; i < 10; i++ {
+			if _, ok := c.Get(i); ok {
+				t.Fatalf("found key: %d", i)
+			}
+		}
+	})
 }
 
 func TestInterlace(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
-	defer c.Close()
-	swap := false
-	for i := range 10 {
-		swap = !swap
-		ttl := DefaultTTL
-		if swap {
-			ttl = NoTTL
-		}
-		c.Set(i, true, ttl)
-	}
 
-	time.Sleep(1 * time.Second)
-	swap = false
-	for i := range 10 {
-		swap = !swap
-		if !swap {
-			continue
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
+		defer c.Close()
+		swap := false
+		for i := range 10 {
+			swap = !swap
+			ttl := DefaultTTL
+			if swap {
+				ttl = NoTTL
+			}
+			c.Set(i, true, ttl)
 		}
 
-		if _, ok := c.Get(i); !ok {
-			t.Fatalf("found key: %d", i)
+		synctest.Sleep(1 * time.Second)
+		swap = false
+		for i := range 10 {
+			swap = !swap
+			if !swap {
+				continue
+			}
+
+			if _, ok := c.Get(i); !ok {
+				t.Fatalf("found key: %d", i)
+			}
 		}
-	}
+	})
 }
 
 func TestReschedule(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
-	defer c.Close()
-	for i := 1; i < 10; i++ {
-		c.Set(i, true, NoTTL)
-		c.Set(i, true, DefaultTTL)
-	}
 
-	time.Sleep(1 * time.Second)
-	for i := 1; i < 10; i++ {
-		if _, ok := c.Get(i); ok {
-			t.Fatalf("found key: %d", i)
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
+		defer c.Close()
+		for i := 1; i < 10; i++ {
+			c.Set(i, true, NoTTL)
+			c.Set(i, true, DefaultTTL)
 		}
-	}
+
+		synctest.Sleep(1 * time.Second)
+		for i := 1; i < 10; i++ {
+			if _, ok := c.Get(i); ok {
+				t.Fatalf("found key: %d", i)
+			}
+		}
+	})
 }
 
 func TestRescheduleNoTTL(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
-	defer c.Close()
-	for i := 1; i < 10; i++ {
-		c.Set(i, true, DefaultTTL)
-		c.Set(i, true, NoTTL)
-	}
 
-	time.Sleep(1 * time.Second)
-	for i := 1; i < 10; i++ {
-		if _, ok := c.Get(i); !ok {
-			t.Fatalf("found key: %d", i)
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
+		defer c.Close()
+		for i := 1; i < 10; i++ {
+			c.Set(i, true, DefaultTTL)
+			c.Set(i, true, NoTTL)
 		}
-	}
+
+		synctest.Sleep(1 * time.Second)
+		for i := 1; i < 10; i++ {
+			if _, ok := c.Get(i); !ok {
+				t.Fatalf("found key: %d", i)
+			}
+		}
+	})
 }
 
 func TestDelete(t *testing.T) {
@@ -182,21 +204,24 @@ func TestDelete(t *testing.T) {
 
 func TestDeallocationTimeout(t *testing.T) {
 	t.Parallel()
-	var hit atomic.Bool // the deallocation runs on the expiration goroutine.
-	c := New[int, bool](
-		SetDefaultTTL(time.Millisecond*100),
-		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit.Store(reason == ReasonTimedOut) }),
-	)
-	defer c.Close()
 
-	for i := range 1 {
-		c.Set(i, true, DefaultTTL)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var hit atomic.Bool // the deallocation runs on the expiration goroutine.
+		c := New[int, bool](
+			SetDefaultTTL(time.Millisecond*100),
+			SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit.Store(reason == ReasonTimedOut) }),
+		)
+		defer c.Close()
 
-	time.Sleep(3 * time.Second)
-	if !hit.Load() {
-		t.Fatalf("Deallocation not hit.")
-	}
+		for i := range 1 {
+			c.Set(i, true, DefaultTTL)
+		}
+
+		synctest.Sleep(3 * time.Second)
+		if !hit.Load() {
+			t.Fatalf("Deallocation not hit.")
+		}
+	})
 }
 
 func TestDeallocationDeleted(t *testing.T) {
@@ -415,70 +440,76 @@ func TestDeallocationReentrancy(t *testing.T) {
 func TestExplicitTTLFinerThanResolution(t *testing.T) {
 	t.Parallel()
 
-	// A coarse default TTL used to drag short explicit TTLs up to its derived
-	// resolution: a 200ms item in this cache lived for seconds.
-	c := New[int, int](
-		SetDefaultTTL(10*time.Second),
-		DisableUpdateTime(true),
-	)
-	defer c.Close()
+	synctest.Test(t, func(t *testing.T) {
+		// A coarse default TTL used to drag short explicit TTLs up to its derived
+		// resolution: a 200ms item in this cache lived for seconds.
+		c := New[int, int](
+			SetDefaultTTL(10*time.Second),
+			DisableUpdateTime(true),
+		)
+		defer c.Close()
 
-	c.Set(1, 1, 200*time.Millisecond)
-	if _, ok := c.Get(1); !ok {
-		t.Fatal("item missing right after Set")
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+		c.Set(1, 1, 200*time.Millisecond)
 		if _, ok := c.Get(1); !ok {
-			return
+			t.Fatal("item missing right after Set")
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("item with a 200ms TTL still alive after 2s")
+
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if _, ok := c.Get(1); !ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("item with a 200ms TTL still alive after 2s")
+			}
+			synctest.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	})
 }
 
 func TestExplicitTTLNoOptions(t *testing.T) {
 	t.Parallel()
 
-	// Without a default TTL the clock used to fall back to one-second
-	// rounding, so sub-second TTLs were honored a second late.
-	c := New[int, int](DisableUpdateTime(true))
-	defer c.Close()
+	synctest.Test(t, func(t *testing.T) {
+		// Without a default TTL the clock used to fall back to one-second
+		// rounding, so sub-second TTLs were honored a second late.
+		c := New[int, int](DisableUpdateTime(true))
+		defer c.Close()
 
-	c.Set(1, 1, 100*time.Millisecond)
+		c.Set(1, 1, 100*time.Millisecond)
 
-	deadline := time.Now().Add(800 * time.Millisecond)
-	for {
-		if _, ok := c.Get(1); !ok {
-			return
+		deadline := time.Now().Add(800 * time.Millisecond)
+		for {
+			if _, ok := c.Get(1); !ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("item with a 100ms TTL still alive after 800ms")
+			}
+			synctest.Sleep(5 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("item with a 100ms TTL still alive after 800ms")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	})
 }
 
 func TestShortTTLStillSlides(t *testing.T) {
 	t.Parallel()
 
-	// Refresh batching is capped at half the item's own TTL, so an item finer
-	// than the cache resolution still has its expiration pushed by Get.
-	c := New[int, int](SetDefaultTTL(10 * time.Second))
-	defer c.Close()
+	synctest.Test(t, func(t *testing.T) {
+		// Refresh batching is capped at half the item's own TTL, so an item finer
+		// than the cache resolution still has its expiration pushed by Get.
+		c := New[int, int](SetDefaultTTL(10 * time.Second))
+		defer c.Close()
 
-	c.Set(1, 1, time.Second)
+		c.Set(1, 1, time.Second)
 
-	deadline := time.Now().Add(2500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if _, ok := c.Get(1); !ok {
-			t.Fatal("item expired while being read")
+		deadline := time.Now().Add(2500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if _, ok := c.Get(1); !ok {
+				t.Fatal("item expired while being read")
+			}
+			synctest.Sleep(25 * time.Millisecond)
 		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	})
 }
 
 func TestDeallocationFuncTypeMismatchPanics(t *testing.T) {
