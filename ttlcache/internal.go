@@ -74,15 +74,17 @@ func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
 func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 	c.l.Lock()
 	old, displaced := c.m[key]
+	reason := ReasonReplaced
+	if displaced && old.expired(time.Now()) {
+		// classified at removal, while the lock is still held: judging after
+		// the unlock would let a deadline passing in between report a value
+		// that was displaced live as timed out.
+		reason = ReasonTimedOut
+	}
 	it = c._s(key, it)
 	c.l.Unlock()
 
 	if displaced && c.deallocationFn != nil {
-		reason := ReasonReplaced
-		if old.expired(time.Now()) {
-			reason = ReasonTimedOut
-		}
-
 		c.deallocationFn(key, old.v, reason)
 	}
 
@@ -158,14 +160,15 @@ func (c *Cache[K, V]) delete(key K, reason DeallocationReason) {
 		return
 	}
 
+	if v.expired(time.Now()) {
+		// classified at removal, while the lock is still held; see set.
+		reason = ReasonTimedOut
+	}
+
 	delete(c.m, key)
 	c.l.Unlock()
 
 	if c.deallocationFn != nil {
-		if v.expired(time.Now()) {
-			reason = ReasonTimedOut
-		}
-
 		c.deallocationFn(key, v.v, reason)
 	}
 }
