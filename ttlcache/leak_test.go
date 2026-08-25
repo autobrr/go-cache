@@ -7,64 +7,88 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"reflect"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// pkgFrame identifies stack frames belonging to this package. It is matched
-// against the import path, so it needs updating if the module is renamed.
-const pkgFrame = "go-cache/ttlcache."
+// pkgFrame identifies stack frames belonging to this package. Derived from the
+// package's own import path so a module rename cannot silently strand the
+// filter matching nothing -- zero matches is the passing state.
+var pkgFrame = reflect.TypeFor[Cache[int, int]]().PkgPath() + "."
 
-// leakedGoroutines returns the goroutineleak profile records whose stacks
-// touch this package.
+// leakedGoroutines returns how many goroutines with stacks touching this
+// package the goroutineleak profile reports, along with their records.
 //
 // The profile reports goroutines the collector can prove will never be
-// unblocked, so a goroutine that is merely parked -- a live cache waiting on
-// its wake channel -- is not reported. It is process-wide and cumulative
-// though, so the records are filtered to this package to avoid blaming it for
-// a leak somewhere else.
-func leakedGoroutines() ([]string, error) {
+// unblocked. A goroutine that is merely parked is not reported, and neither is
+// one holding an armed timer -- a cache left running with expirations pending
+// counts as wakeable, so a forgotten Close is only caught once nothing can
+// wake its loop. The profile is process-wide and cumulative, so the records
+// are filtered to this package to avoid blaming it for a leak somewhere else.
+func leakedGoroutines() (int, []string, error) {
 	runtime.GC() // the profile is derived from GC reachability.
 
 	var buf bytes.Buffer
 	if err := pprof.Lookup("goroutineleak").WriteTo(&buf, 1); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 
+	// the debug=1 format is a "goroutineleak profile: total N" header line,
+	// then one record per unique stack separated by blank lines; identical
+	// goroutines aggregate into a single record with a leading "N @" count.
+	_, records, _ := strings.Cut(buf.String(), "\n")
+
+	total := 0
 	var leaked []string
-	for _, record := range strings.Split(buf.String(), "\n\n") {
-		if strings.Contains(record, pkgFrame) {
-			leaked = append(leaked, strings.TrimSpace(record))
+	for _, record := range strings.Split(records, "\n\n") {
+		if !strings.Contains(record, pkgFrame) {
+			continue
 		}
+
+		record = strings.TrimSpace(record)
+		count, _, _ := strings.Cut(record, " @")
+		if n, err := strconv.Atoi(count); err == nil {
+			total += n
+		} else {
+			total++
+		}
+
+		leaked = append(leaked, record)
 	}
 
-	return leaked, nil
+	return total, leaked, nil
 }
 
 // TestMain re-checks for leaks once the whole suite has finished.
 //
 // TestNoGoroutineLeak can only see its own workload: the profile is
 // process-wide, so that test cannot run in parallel, which means it completes
-// before the parallel tests resume. Checking here catches a cache that any
-// test left running.
+// before the parallel tests resume. Checking here catches a cache that a test
+// left parked with nothing left to wake it. It is a backstop, not proof: per
+// the leakedGoroutines caveat, a forgotten Close on a cache still holding an
+// armed timer goes unreported.
 func TestMain(m *testing.M) {
 	code := m.Run()
 
-	// Only meaningful on a green run. A failing test may have bailed out
-	// before closing its cache -- TestSetDoesNotDeadlockOnFullWakeChannel
-	// deliberately does -- and reporting that on top of the real failure
-	// buries it.
-	if code == 0 {
-		leaked, err := leakedGoroutines()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "writing goroutineleak profile: %v\n", err)
+	total, leaked, err := leakedGoroutines()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "writing goroutineleak profile: %v\n", err)
+		if code == 0 {
 			code = 1
-		} else if len(leaked) != 0 {
-			fmt.Fprintf(os.Stderr, "%d goroutine(s) still leaked after the suite finished:\n%s\n",
-				len(leaked), strings.Join(leaked, "\n\n"))
+		}
+	} else if total != 0 {
+		// On a red run this is diagnosis, not a verdict -- a failing test may
+		// have legitimately bailed out before closing its cache, the way
+		// TestSetDoesNotDeadlockOnFullWakeChannel deliberately does -- so it
+		// must never mask the original exit code.
+		fmt.Fprintf(os.Stderr, "%d goroutine(s) still leaked after the suite finished:\n%s\n",
+			total, strings.Join(leaked, "\n\n"))
+		if code == 0 {
 			code = 1
 		}
 	}
@@ -84,22 +108,23 @@ func TestNoGoroutineLeak(t *testing.T) {
 			SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {}),
 		)
 
+		c.Set(-1, -1, NoTTL) // parks the loop on the wake channel before any timer is armed
+
 		for i := range 50 {
 			c.Set(i, i, DefaultTTL)
 		}
 
-		c.Set(-1, -1, NoTTL) // parks the loop on the wake channel, no timer armed
 		c.Get(1)
 		c.Delete(2)
 		c.Close()
 	}
 
-	leaked, err := leakedGoroutines()
+	total, leaked, err := leakedGoroutines()
 	if err != nil {
 		t.Fatalf("writing goroutineleak profile: %v", err)
 	}
 
-	if len(leaked) != 0 {
-		t.Fatalf("%d leaked goroutine(s):\n%s", len(leaked), strings.Join(leaked, "\n\n"))
+	if total != 0 {
+		t.Fatalf("%d leaked goroutine(s):\n%s", total, strings.Join(leaked, "\n\n"))
 	}
 }
