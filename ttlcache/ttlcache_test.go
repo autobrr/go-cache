@@ -89,6 +89,16 @@ func TestRetimer(t *testing.T) {
 			c.Set(i, true, time.Duration(10-i)*100*time.Millisecond)
 		}
 
+		// the shortest TTL was set last, so collecting key 9 on time requires
+		// the loop to re-arm its timer to the earlier deadline.
+		synctest.Sleep(150 * time.Millisecond)
+		if _, ok := c.Get(9); ok {
+			t.Fatal("key 9 outlived its 100ms TTL; the timer was not re-armed to the earlier deadline")
+		}
+		if _, ok := c.Get(8); !ok {
+			t.Fatal("missing key: 8")
+		}
+
 		synctest.Sleep(2 * time.Second)
 		for i := 1; i < 10; i++ {
 			if _, ok := c.Get(i); ok {
@@ -142,7 +152,7 @@ func TestInterlace(t *testing.T) {
 			}
 
 			if _, ok := c.Get(i); !ok {
-				t.Fatalf("found key: %d", i)
+				t.Fatalf("missing key: %d", i)
 			}
 		}
 	})
@@ -182,7 +192,7 @@ func TestRescheduleNoTTL(t *testing.T) {
 		synctest.Sleep(1 * time.Second)
 		for i := 1; i < 10; i++ {
 			if _, ok := c.Get(i); !ok {
-				t.Fatalf("found key: %d", i)
+				t.Fatalf("missing key: %d", i)
 			}
 		}
 	})
@@ -418,7 +428,6 @@ func TestIterationBodyMayTouchTheCache(t *testing.T) {
 	t.Parallel()
 
 	c := New[int, int](SetDefaultTTL(time.Minute))
-	defer c.Close()
 
 	for i := range 10 {
 		c.Set(i, i, DefaultTTL)
@@ -432,12 +441,52 @@ func TestIterationBodyMayTouchTheCache(t *testing.T) {
 			c.Set(k+100, v, DefaultTTL)
 			c.Delete(k)
 		}
+
+		for k := range c.Keys() {
+			c.Delete(k)
+		}
 	}()
 
 	select {
 	case <-done:
+		c.Close()
 	case <-time.After(10 * time.Second):
+		// Close would block on the same held lock, so leave the cache alone.
 		t.Fatal("iteration deadlocked against a body that used the cache")
+	}
+}
+
+// A key that leaves the cache between the snapshot and the body reaching it
+// must be skipped, not yielded with a zero value.
+func TestAllSkipsDepartedEntries(t *testing.T) {
+	t.Parallel()
+
+	c := New[int, int](SetDefaultTTL(time.Minute))
+	defer c.Close()
+
+	const count = 10
+	for i := range count {
+		c.Set(i, i+1, DefaultTTL) // non-zero values: a zero can only mean a departed entry.
+	}
+
+	// the first visit deletes every other key, so the rest of the snapshot is
+	// departed by the time the iterator reaches it.
+	visited := 0
+	for k, v := range c.All() {
+		if v == 0 {
+			t.Fatalf("departed key %d yielded a zero value", k)
+		}
+		visited++
+
+		for i := range count {
+			if i != k {
+				c.Delete(i)
+			}
+		}
+	}
+
+	if visited != 1 {
+		t.Fatalf("expected exactly 1 visit before the rest departed, got %d", visited)
 	}
 }
 
@@ -474,11 +523,11 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 		// A dropped nudge may delay collection, but every sweep re-derives the
 		// next wake-up from the whole map, so nothing is stranded.
 		deadline := time.Now().Add(30 * time.Second)
-		for len(slices.Collect(c.Keys())) > 0 && time.Now().Before(deadline) {
+		for len(c.getkeys()) > 0 && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		if n := len(slices.Collect(c.Keys())); n != 0 {
+		if n := len(c.getkeys()); n != 0 {
 			t.Fatalf("%d entries never expired after dropped wake-ups", n)
 		}
 
@@ -552,15 +601,9 @@ func TestExplicitTTLFinerThanResolution(t *testing.T) {
 			t.Fatal("item missing right after Set")
 		}
 
-		deadline := time.Now().Add(2 * time.Second)
-		for {
-			if _, ok := c.Get(1); !ok {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("item with a 200ms TTL still alive after 2s")
-			}
-			synctest.Sleep(5 * time.Millisecond)
+		synctest.Sleep(201 * time.Millisecond)
+		if _, ok := c.Get(1); ok {
+			t.Fatal("item with a 200ms TTL still alive after 201ms")
 		}
 	})
 }
@@ -576,15 +619,9 @@ func TestExplicitTTLNoOptions(t *testing.T) {
 
 		c.Set(1, 1, 100*time.Millisecond)
 
-		deadline := time.Now().Add(800 * time.Millisecond)
-		for {
-			if _, ok := c.Get(1); !ok {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("item with a 100ms TTL still alive after 800ms")
-			}
-			synctest.Sleep(5 * time.Millisecond)
+		synctest.Sleep(101 * time.Millisecond)
+		if _, ok := c.Get(1); ok {
+			t.Fatal("item with a 100ms TTL still alive after 101ms")
 		}
 	})
 }
