@@ -4,6 +4,8 @@
 package ttlcache
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -315,7 +317,7 @@ func TestGetDoesNotClobberSet(t *testing.T) {
 	}
 }
 
-func TestGetKeys(t *testing.T) {
+func TestKeys(t *testing.T) {
 	t.Parallel()
 	c := New[int, bool](SetDefaultTTL(1 * time.Second))
 	defer c.Close()
@@ -325,7 +327,7 @@ func TestGetKeys(t *testing.T) {
 		c.Set(i, true, DefaultTTL)
 	}
 
-	keys := c.GetKeys()
+	keys := slices.Collect(c.Keys())
 	if len(keys) != count {
 		t.Fatalf("expected %d keys, got %d: %v", count, len(keys), keys)
 	}
@@ -340,6 +342,102 @@ func TestGetKeys(t *testing.T) {
 		if _, ok := c.Get(k); !ok {
 			t.Fatalf("key not in cache: %d", k)
 		}
+	}
+}
+
+func TestKeysStopsEarly(t *testing.T) {
+	t.Parallel()
+	c := New[int, bool](SetDefaultTTL(1 * time.Second))
+	defer c.Close()
+
+	for i := range 10 {
+		c.Set(i, true, DefaultTTL)
+	}
+
+	n := 0
+	for range c.Keys() {
+		n++
+		break
+	}
+
+	if n != 1 {
+		t.Fatalf("break did not stop iteration, ran %d times", n)
+	}
+}
+
+func TestAll(t *testing.T) {
+	t.Parallel()
+	c := New[int, int](SetDefaultTTL(1 * time.Second))
+	defer c.Close()
+
+	const count = 10
+	for i := range count {
+		c.Set(i, i*10, DefaultTTL)
+	}
+
+	got := maps.Collect(c.All())
+	if len(got) != count {
+		t.Fatalf("expected %d pairs, got %d: %v", count, len(got), got)
+	}
+
+	for k, v := range got {
+		if v != k*10 {
+			t.Fatalf("key %d carried value %d", k, v)
+		}
+	}
+}
+
+// Iterating must not push expirations forward. A loop that merely inspects the
+// cache would otherwise keep every item it touched alive indefinitely.
+func TestAllDoesNotRefreshExpirations(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		c := New[int, int](SetDefaultTTL(500 * time.Millisecond))
+		defer c.Close()
+
+		c.Set(1, 1, DefaultTTL)
+
+		// range across more than the item's whole lifetime
+		for range 10 {
+			for range c.All() {
+			}
+
+			synctest.Sleep(100 * time.Millisecond)
+		}
+
+		if _, ok := c.Get(1); ok {
+			t.Fatal("item outlived its TTL; iteration refreshed it")
+		}
+	})
+}
+
+// The body runs outside the lock, so it may use the cache. Both deadlocks this
+// package has had came from running caller code while holding it.
+func TestIterationBodyMayTouchTheCache(t *testing.T) {
+	t.Parallel()
+
+	c := New[int, int](SetDefaultTTL(time.Minute))
+	defer c.Close()
+
+	for i := range 10 {
+		c.Set(i, i, DefaultTTL)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for k, v := range c.All() {
+			c.Get(k)
+			c.Set(k+100, v, DefaultTTL)
+			c.Delete(k)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("iteration deadlocked against a body that used the cache")
 	}
 }
 
@@ -376,11 +474,11 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 		// A dropped nudge may delay collection, but every sweep re-derives the
 		// next wake-up from the whole map, so nothing is stranded.
 		deadline := time.Now().Add(30 * time.Second)
-		for len(c.GetKeys()) > 0 && time.Now().Before(deadline) {
+		for len(slices.Collect(c.Keys())) > 0 && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		if n := len(c.GetKeys()); n != 0 {
+		if n := len(slices.Collect(c.Keys())); n != 0 {
 			t.Fatalf("%d entries never expired after dropped wake-ups", n)
 		}
 
