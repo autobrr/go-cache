@@ -543,7 +543,7 @@ func TestDeallocationReentrancy(t *testing.T) {
 
 	// The callback used to run under the write lock, so touching the cache
 	// from inside it deadlocked on both the Delete and the timeout path.
-	done := make(chan DeallocationReason, 2)
+	done := make(chan DeallocationReason, 3)
 	var c *Cache[int, int]
 	c = New[int, int](
 		SetDefaultTTL(100*time.Millisecond),
@@ -552,7 +552,8 @@ func TestDeallocationReentrancy(t *testing.T) {
 			done <- reason
 		}),
 	)
-	defer c.Close()
+	// no deferred Close: on the failure paths a deadlocked goroutine still
+	// holds the write lock, and Close would hang the whole binary on it.
 
 	c.Set(1, 1, NoTTL)
 	deleted := make(chan struct{})
@@ -569,8 +570,21 @@ func TestDeallocationReentrancy(t *testing.T) {
 
 	c.Set(2, 2, DefaultTTL)
 
+	c.Set(3, 3, NoTTL)
+	replaced := make(chan struct{})
+	go func() {
+		c.Set(3, 33, NoTTL)
+		close(replaced)
+	}()
+
+	select {
+	case <-replaced:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Set deadlocked running the deallocation callback for the displaced value")
+	}
+
 	seen := make(map[DeallocationReason]bool)
-	for range 2 {
+	for range 3 {
 		select {
 		case r := <-done:
 			seen[r] = true
@@ -579,8 +593,84 @@ func TestDeallocationReentrancy(t *testing.T) {
 		}
 	}
 
-	if !seen[ReasonDeleted] || !seen[ReasonTimedOut] {
-		t.Fatalf("expected both reasons, got: %v", seen)
+	if !seen[ReasonDeleted] || !seen[ReasonTimedOut] || !seen[ReasonReplaced] {
+		t.Fatalf("expected all three reasons, got: %v", seen)
+	}
+
+	c.Close()
+}
+
+func TestGetOrSet(t *testing.T) {
+	t.Parallel()
+	c := New[int, int](SetDefaultTTL(time.Minute))
+	defer c.Close()
+
+	if v, loaded := c.GetOrSet(1, 10, DefaultTTL); loaded || v != 10 {
+		t.Fatalf("store path: got v=%d loaded=%v", v, loaded)
+	}
+
+	if v, loaded := c.GetOrSet(1, 20, DefaultTTL); !loaded || v != 10 {
+		t.Fatalf("load path: got v=%d loaded=%v", v, loaded)
+	}
+}
+
+func TestDeallocationReplaced(t *testing.T) {
+	t.Parallel()
+
+	// Set over a live key must hand the displaced value to the callback:
+	// callers storing resources rely on it to release the loser of a
+	// prepare-then-Set race.
+	type call struct {
+		value  int
+		reason DeallocationReason
+	}
+	var calls []call
+	c := New[int, int](
+		SetDefaultTTL(time.Minute),
+		SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {
+			calls = append(calls, call{value, reason})
+		}),
+	)
+	defer c.Close()
+
+	c.Set(1, 10, DefaultTTL)      // fresh key: no callback
+	c.Set(1, 20, DefaultTTL)      // displaces 10
+	c.GetOrSet(1, 30, DefaultTTL) // found, nothing displaced: no callback
+
+	if len(calls) != 1 || calls[0].value != 10 || calls[0].reason != ReasonReplaced {
+		t.Fatalf("expected one ReasonReplaced callback for value 10, got: %+v", calls)
+	}
+
+	if v, _ := c.Get(1); v != 20 {
+		t.Fatalf("cache should hold 20, got: %d", v)
+	}
+}
+
+func TestRefreshIsNotReplacement(t *testing.T) {
+	t.Parallel()
+
+	// A fine resolution makes nearly every Get take the write-lock refresh
+	// path, which re-stores the item through _s. That self-replacement must
+	// not reach the deallocation callback.
+	replaced := 0
+	c := New[int, int](
+		SetDefaultTTL(time.Minute),
+		SetTimerResolution(time.Nanosecond),
+		SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {
+			if reason == ReasonReplaced {
+				replaced++
+			}
+		}),
+	)
+	defer c.Close()
+
+	c.Set(1, 1, DefaultTTL)
+	for range 100 {
+		c.Get(1)
+	}
+
+	if replaced != 0 {
+		t.Fatalf("refresh fired %d ReasonReplaced callbacks", replaced)
 	}
 }
 

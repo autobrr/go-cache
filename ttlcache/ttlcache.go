@@ -58,6 +58,7 @@ type DeallocationReason int
 const (
 	ReasonTimedOut = DeallocationReason(iota)
 	ReasonDeleted  = DeallocationReason(iota)
+	ReasonReplaced = DeallocationReason(iota)
 )
 
 type DeallocationFunc[K comparable, V any] func(key K, value V, reason DeallocationReason)
@@ -111,13 +112,12 @@ func (c *Cache[K, V]) GetItem(key K) (Item[V], bool) {
 	return c.getRefresh(key)
 }
 
+// GetOrSet returns the value stored under key if present, or stores value
+// under it. The bool reports whether the key was already present, like
+// sync.Map.LoadOrStore. Unlike Get, a hit does not push the expiration.
 func (c *Cache[K, V]) GetOrSet(key K, value V, duration time.Duration) (V, bool) {
-	it, ok := c.GetOrSetItem(key, value, duration)
-	if !ok {
-		return *new(V), ok
-	}
-
-	return it.GetValue(), ok
+	it, loaded := c.GetOrSetItem(key, value, duration)
+	return it.GetValue(), loaded
 }
 
 func (c *Cache[K, V]) fixupDuration(duration time.Duration) time.Duration {
@@ -128,13 +128,10 @@ func (c *Cache[K, V]) fixupDuration(duration time.Duration) time.Duration {
 	return duration
 }
 
+// GetOrSetItem is GetOrSet returning the full item; the bool again means the
+// key was already present.
 func (c *Cache[K, V]) GetOrSetItem(key K, value V, duration time.Duration) (Item[V], bool) {
-	it, ok := c.getOrSet(key, Item[V]{v: value, d: c.fixupDuration(duration)})
-	if !ok {
-		return Item[V]{}, ok
-	}
-
-	return it, ok
+	return c.getOrSet(key, Item[V]{v: value, d: c.fixupDuration(duration)})
 }
 
 func (c *Cache[K, V]) Set(key K, value V, duration time.Duration) bool {
@@ -230,10 +227,12 @@ func DisableUpdateTime(val bool) Option {
 	}
 }
 
-// SetDeallocationFunc registers f to run whenever an item leaves the cache,
-// whether it timed out or was deleted. f runs after the item is already gone
-// and outside the cache's lock, so it may call back into the cache; timeouts
-// invoke it on the expiration goroutine.
+// SetDeallocationFunc registers f to run whenever an item leaves the cache:
+// it timed out, was deleted, or was displaced by a Set storing a new value
+// under its key. f runs after the item is already gone and outside the
+// cache's lock, so it may call back into the cache; timeouts invoke it on the
+// expiration goroutine. Re-storing a value that is already cached counts as
+// replacing it, and items still in the cache at Close are not deallocated.
 //
 // K and V are inferred from f, so the call site never spells them out. Unlike
 // the other options this one cannot be checked at compile time: Options is not

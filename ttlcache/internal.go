@@ -63,10 +63,21 @@ func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
 	return t.Sub(it.t) > res
 }
 
+// set stores it under key and hands any displaced value to the deallocation
+// callback outside the lock, as ReasonReplaced. getRefresh deliberately
+// bypasses this by calling _s directly: re-stamping an item is not a
+// replacement.
 func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 	c.l.Lock()
-	defer c.l.Unlock()
-	return c._s(key, it)
+	old, replaced := c.m[key]
+	it = c._s(key, it)
+	c.l.Unlock()
+
+	if replaced && c.deallocationFn != nil {
+		c.deallocationFn(key, old.v, ReasonReplaced)
+	}
+
+	return it
 }
 
 func (c *Cache[K, V]) _s(key K, it Item[V]) Item[V] {
@@ -111,12 +122,14 @@ func (c *Cache[K, V]) getOrSet(key K, it Item[V]) (Item[V], bool) {
 	return c._gos(key, it)
 }
 
+// _gos returns the existing item and true, or stores it and returns the new
+// item and false. Storing never displaces anything, so no deallocation runs.
 func (c *Cache[K, V]) _gos(key K, it Item[V]) (Item[V], bool) {
 	if g, ok := c._g(key); ok {
-		return g, ok
+		return g, true
 	}
 
-	return c._s(key, it), true
+	return c._s(key, it), false
 }
 
 // delete removes key and then runs the deallocation callback outside the

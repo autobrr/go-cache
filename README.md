@@ -15,9 +15,9 @@ An in-memory generic TTL cache with a single background expiration goroutine.
 
 - per-item TTLs, a configurable default, and `NoTTL` for items that never expire
 - `Get` pushes an item's expiration forward (sliding TTL); disable with `DisableUpdateTime(true)`
-- a deallocation callback runs whenever an item times out or is deleted; it runs outside the cache lock, so it may call back into the cache
+- a deallocation callback runs whenever an item times out, is deleted, or is displaced by a `Set`; it runs outside the cache lock, so it may call back into the cache
 - `Keys` and `All` iterate over a snapshot without holding the lock while the loop body runs
-- `GetOrSet` stores only when the key is absent; `GetItem` exposes the stored duration and deadline
+- `GetOrSet` stores only when the key is absent and reports whether it found or stored; `GetItem` exposes the stored duration and deadline
 - `Close` stops the expiration goroutine
 
 ```go
@@ -57,7 +57,7 @@ Options:
   forward. Defaults to half the default TTL.
 - `DisableUpdateTime(true)` stops a `Get` from extending the item's expiration.
 - `SetDeallocationFunc(f)` registers a callback for items leaving the cache,
-  with the reason (`ReasonTimedOut` or `ReasonDeleted`):
+  with the reason (`ReasonTimedOut`, `ReasonDeleted` or `ReasonReplaced`):
 
 ```go
 c := ttlcache.New[string, net.Conn](
