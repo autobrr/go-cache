@@ -16,11 +16,11 @@ func TestGet(t *testing.T) {
 	c := New[int, bool](SetDefaultTTL(1 * time.Second))
 	defer c.Close()
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		c.Set(i, true, DefaultTTL)
 	}
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		val, ok := c.Get(i)
 		if !ok {
 			t.Fatalf("missing key: %d", i)
@@ -34,13 +34,13 @@ func TestExpirations(t *testing.T) {
 	t.Parallel()
 	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
 	defer c.Close()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		c.Set(i, true, DefaultTTL)
 	}
 
 	time.Sleep(1 * time.Second)
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if _, ok := c.Get(i); ok {
 			t.Fatalf("found key: %d", i)
 		}
@@ -51,12 +51,12 @@ func TestSwaps(t *testing.T) {
 	t.Parallel()
 	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
 	defer c.Close()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		c.Set(i, true, DefaultTTL)
 	}
 
 	time.Sleep(1 * time.Second)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if _, ok := c.Get(i); ok {
 			t.Fatalf("found key: %d", i)
 		}
@@ -107,7 +107,7 @@ func TestInterlace(t *testing.T) {
 	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
 	defer c.Close()
 	swap := false
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		swap = !swap
 		ttl := DefaultTTL
 		if swap {
@@ -118,7 +118,7 @@ func TestInterlace(t *testing.T) {
 
 	time.Sleep(1 * time.Second)
 	swap = false
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		swap = !swap
 		if !swap {
 			continue
@@ -189,7 +189,7 @@ func TestDeallocationTimeout(t *testing.T) {
 	)
 	defer c.Close()
 
-	for i := 0; i < 1; i++ {
+	for i := range 1 {
 		c.Set(i, true, DefaultTTL)
 	}
 
@@ -208,7 +208,7 @@ func TestDeallocationDeleted(t *testing.T) {
 	)
 	defer c.Close()
 
-	for i := 0; i < 1; i++ {
+	for i := range 1 {
 		c.Set(i, true, DefaultTTL)
 		c.Delete(i)
 	}
@@ -232,19 +232,19 @@ func TestTimerReset(t *testing.T) {
 
 	const base = 0
 	const rounds = 1
-	for i := base; i < rounds; i++ {
+	for i := range rounds {
 		c.Set(i, true, DefaultTTL)
 	}
 
-	for i := base; i < rounds; i++ {
+	for range rounds {
 		<-ch
 	}
 
-	for i := 0; i < 1; i++ {
+	for i := range 1 {
 		c.Set(i, true, DefaultTTL)
 	}
 
-	for i := base; i < rounds; i++ {
+	for range rounds {
 		<-ch
 	}
 }
@@ -265,7 +265,7 @@ func TestGetDoesNotClobberSet(t *testing.T) {
 	const rounds = 200000
 
 	lost := 0
-	for i := 0; i < rounds; i++ {
+	for range rounds {
 		c.Set(key, 0, DefaultTTL)
 
 		var wg sync.WaitGroup
@@ -296,7 +296,7 @@ func TestGetKeys(t *testing.T) {
 	defer c.Close()
 
 	const count = 10
-	for i := 0; i < count; i++ {
+	for i := range count {
 		c.Set(i, true, DefaultTTL)
 	}
 
@@ -334,11 +334,11 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 	go func() {
 		defer close(done)
 		var wg sync.WaitGroup
-		for w := 0; w < writers; w++ {
+		for w := range writers {
 			wg.Add(1)
 			go func(w int) {
 				defer wg.Done()
-				for i := 0; i < perWriter; i++ {
+				for i := range perWriter {
 					c.Set(w*perWriter+i, i, DefaultTTL)
 				}
 			}(w)
