@@ -193,11 +193,11 @@ func (c *Cache[K, V]) All() iter.Seq2[K, V] {
 
 // Close stops the expiration goroutine and waits for it to return, including
 // any deallocation callback it is running, so resources the callback uses can
-// be torn down safely once Close returns. Close must not be called from a
-// timeout deallocation callback: those run on the expiration goroutine, and
-// the wait would deadlock. Items stored after Close are kept but never
-// expire -- no sweeper is left to collect them -- so writers and iterating
-// bodies should be done before closing.
+// be torn down safely once Close returns. Close must not be called from any
+// deallocation callback: one receiving ReasonTimedOut cannot tell whether it
+// is on the expiration goroutine, where the wait would deadlock. Items stored
+// after Close are kept but never expire -- no sweeper is left to collect
+// them -- so writers and iterating bodies should be done before closing.
 func (c *Cache[K, V]) Close() {
 	c.close()
 }
@@ -239,11 +239,14 @@ func DisableUpdateTime(val bool) Option {
 // SetDeallocationFunc registers f to run whenever an item leaves the cache:
 // it timed out, was deleted, or was displaced by a Set storing a new value
 // under its key. f runs after the item is already gone and outside the
-// cache's lock, so it may call back into the cache; timeouts invoke it on the
-// expiration goroutine. Re-storing a value that is already cached counts as
+// cache's lock, so it may call back into the cache -- except Close; see
+// there. It runs on whichever goroutine removed the item: sweeps invoke it on
+// the expiration goroutine, while a Set, GetOrSet, or Delete that collects an
+// entry invokes it on the caller, so invocations may run concurrently and f
+// must be safe for that. Re-storing a value that is already cached counts as
 // replacing it, and items still in the cache at Close are not deallocated.
-// A value whose deadline had already passed is always reported as timed out,
-// however it left the cache.
+// A value whose deadline had already passed when it was removed is always
+// reported as timed out, however it left the cache.
 //
 // K and V are inferred from f, so the call site never spells them out. Unlike
 // the other options this one cannot be checked at compile time: Options is not
