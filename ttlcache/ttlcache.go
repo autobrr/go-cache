@@ -6,6 +6,7 @@ package ttlcache
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"time"
 )
 
@@ -97,24 +98,27 @@ func (c *Cache[K, V]) Delete(key K) {
 	c.delete(key, ReasonDeleted)
 }
 
+// GetKeys returns the keys as a slice the caller owns.
+//
+// Deprecated: use Keys.
+func (c *Cache[K, V]) GetKeys() []K {
+	return c.getkeys()
+}
+
 // Keys returns an iterator over the keys in the cache.
 //
 // The cache is not locked while the loop body runs, so the body may call back
 // into the cache -- the same reason deallocation callbacks run outside the
-// lock. The keys are a snapshot taken when iteration starts, so an entry may
+// lock. The keys are a snapshot taken when Keys is called, so an entry may
 // leave the cache before the body reaches it.
 func (c *Cache[K, V]) Keys() iter.Seq[K] {
-	return func(yield func(K) bool) {
-		for _, k := range c.getkeys() {
-			if !yield(k) {
-				return
-			}
-		}
-	}
+	return slices.Values(c.getkeys())
 }
 
 // All returns an iterator over the key/value pairs in the cache. Entries that
 // left the cache between the snapshot and the body reaching them are skipped.
+// Like Get, that means removed, not stale: an entry past its TTL that the
+// sweep has not collected yet is still yielded.
 //
 // Unlike Get, iterating does not push expirations forward: ranging over the
 // cache to inspect it would otherwise slide every item's TTL.
@@ -133,6 +137,9 @@ func (c *Cache[K, V]) All() iter.Seq2[K, V] {
 	}
 }
 
+// Close stops the expiration goroutine. Items stored after Close are kept but
+// never expire -- no sweeper is left to collect them -- so writers and
+// iterating bodies should be done before closing.
 func (c *Cache[K, V]) Close() {
 	c.close()
 }
