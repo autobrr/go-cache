@@ -4,6 +4,8 @@
 package ttlcache
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -179,10 +181,10 @@ func TestDelete(t *testing.T) {
 
 func TestDeallocationTimeout(t *testing.T) {
 	t.Parallel()
-	hit := false
+	var hit atomic.Bool // the deallocation runs on the expiration goroutine.
 	o := Options[int, bool]{}.
 		SetDefaultTTL(time.Millisecond * 100).
-		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit = reason == ReasonTimedOut })
+		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit.Store(reason == ReasonTimedOut) })
 
 	c := New[int, bool](o)
 	defer c.Close()
@@ -192,7 +194,7 @@ func TestDeallocationTimeout(t *testing.T) {
 	}
 
 	time.Sleep(3 * time.Second)
-	if !hit {
+	if !hit.Load() {
 		t.Fatalf("Deallocation not hit.")
 	}
 }
@@ -244,5 +246,45 @@ func TestTimerReset(t *testing.T) {
 
 	for i := base; i < rounds; i++ {
 		<-ch
+	}
+}
+
+func TestGetDoesNotClobberSet(t *testing.T) {
+	t.Parallel()
+
+	// A fine timer resolution makes the TTL refresh in GetItem fire on nearly
+	// every Get, which is what exposes the read-then-write race.
+	c := New[int, int](Options[int, int]{}.
+		SetDefaultTTL(time.Minute).
+		SetTimerResolution(10 * time.Microsecond))
+
+	defer c.Close()
+
+	const key = 1
+	const rounds = 200000
+
+	lost := 0
+	for i := 0; i < rounds; i++ {
+		c.Set(key, 0, DefaultTTL)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			c.Get(key)
+		}()
+		go func() {
+			defer wg.Done()
+			c.Set(key, 1, DefaultTTL)
+		}()
+		wg.Wait()
+
+		if v, _ := c.Get(key); v != 1 {
+			lost++
+		}
+	}
+
+	if lost != 0 {
+		t.Fatalf("lost %d writes out of %d rounds", lost, rounds)
 	}
 }

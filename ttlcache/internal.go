@@ -20,6 +20,41 @@ func (c *Cache[K, V]) _g(key K) (Item[V], bool) {
 	return v, ok
 }
 
+// getRefresh returns the item stored under key and pushes its expiration
+// forward. The lookup and the write-back happen inside the same critical
+// section: reading under RLock and writing the copy back afterwards let a Set
+// that landed in between get overwritten by the stale copy.
+func (c *Cache[K, V]) getRefresh(key K) (Item[V], bool) {
+	c.l.RLock()
+	it, ok := c._g(key)
+	needs := ok && c.needsRefresh(it)
+	c.l.RUnlock()
+
+	if !needs {
+		return it, ok
+	}
+
+	c.l.Lock()
+	defer c.l.Unlock()
+
+	// the item may have been replaced or deleted while the lock was upgraded.
+	it, ok = c._g(key)
+	if !ok || !c.needsRefresh(it) {
+		return it, ok
+	}
+
+	return c._s(key, it), true
+}
+
+func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
+	if c.o.noUpdateTime || it.t.IsZero() {
+		return false
+	}
+
+	_, t := c.getDuration(it.d)
+	return t.After(it.t)
+}
+
 func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 	c.l.Lock()
 	defer c.l.Unlock()

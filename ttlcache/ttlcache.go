@@ -36,18 +36,7 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 }
 
 func (c *Cache[K, V]) GetItem(key K) (Item[V], bool) {
-	it, ok := c.get(key)
-	if !ok {
-		return it, ok
-	}
-
-	if !c.o.noUpdateTime && !it.t.IsZero() {
-		if _, t := c.getDuration(it.d); t.After(it.t) {
-			c.set(key, it)
-		}
-	}
-
-	return it, ok
+	return c.getRefresh(key)
 }
 
 func (c *Cache[K, V]) GetOrSet(key K, value V, duration time.Duration) (V, bool) {
