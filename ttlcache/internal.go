@@ -110,7 +110,7 @@ func (c *Cache[K, V]) getkeys() []K {
 	c.l.RLock()
 	defer c.l.RUnlock()
 
-	keys := make([]K, len(c.m))
+	keys := make([]K, 0, len(c.m))
 	for k := range c.m {
 		keys = append(keys, k)
 	}

@@ -288,3 +288,31 @@ func TestGetDoesNotClobberSet(t *testing.T) {
 		t.Fatalf("lost %d writes out of %d rounds", lost, rounds)
 	}
 }
+
+func TestGetKeys(t *testing.T) {
+	t.Parallel()
+	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(1 * time.Second))
+	defer c.Close()
+
+	const count = 10
+	for i := 0; i < count; i++ {
+		c.Set(i, true, DefaultTTL)
+	}
+
+	keys := c.GetKeys()
+	if len(keys) != count {
+		t.Fatalf("expected %d keys, got %d: %v", count, len(keys), keys)
+	}
+
+	seen := make(map[int]bool, len(keys))
+	for _, k := range keys {
+		if seen[k] {
+			t.Fatalf("duplicate key: %d", k)
+		}
+		seen[k] = true
+
+		if _, ok := c.Get(k); !ok {
+			t.Fatalf("key not in cache: %d", k)
+		}
+	}
+}
