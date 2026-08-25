@@ -937,6 +937,30 @@ func TestShortTTLStillSlides(t *testing.T) {
 	})
 }
 
+func TestExplicitNanosecondIsNotDefaultTTL(t *testing.T) {
+	t.Parallel()
+
+	// The sentinel used to be 1ns, so an explicit 1ns TTL stored the default
+	// instead -- and with no default configured it became NoTTL, immortal.
+	c := New[int, int](SetDefaultTTL(time.Minute), DisableUpdateTime(true))
+	defer c.Close()
+
+	c.Set(1, 1, time.Nanosecond)
+	time.Sleep(time.Millisecond)
+	if _, ok := c.Get(1); ok {
+		t.Fatal("a 1ns item took the default TTL instead of expiring")
+	}
+
+	c2 := New[int, int](DisableUpdateTime(true))
+	defer c2.Close()
+
+	c2.Set(1, 1, time.Nanosecond)
+	time.Sleep(time.Millisecond)
+	if _, ok := c2.Get(1); ok {
+		t.Fatal("a 1ns item in a no-default cache became immortal")
+	}
+}
+
 func TestDeallocationFuncTypeMismatchPanics(t *testing.T) {
 	t.Parallel()
 

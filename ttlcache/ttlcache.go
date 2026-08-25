@@ -11,8 +11,13 @@ import (
 	"time"
 )
 
+// NoTTL stores an item that never expires.
 const NoTTL time.Duration = 0
-const DefaultTTL time.Duration = time.Nanosecond * 1
+
+// DefaultTTL marks an item to be stored with the cache's configured default
+// TTL. It is negative so it cannot collide with a real duration; negative
+// TTLs are reserved as sentinels.
+const DefaultTTL time.Duration = -1
 
 type Cache[K comparable, V any] struct {
 	l              sync.RWMutex
