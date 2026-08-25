@@ -9,8 +9,8 @@ import (
 
 func (c *Cache[K, V]) startExpirations() {
 	timer := time.NewTimer(1 * time.Second)
-	stopTimer(timer) // wasteful, but makes the loop cleaner because this is initialized.
-	defer stopTimer(timer)
+	timer.Stop() // wasteful, but makes the loop cleaner because this is initialized.
+	defer timer.Stop()
 
 	var timeSleep time.Time
 	for {
@@ -24,28 +24,15 @@ func (c *Cache[K, V]) startExpirations() {
 
 			if timeSleep.IsZero() || timeSleep.After(t) {
 				timeSleep = t
-				restartTimer(timer, time.Until(timeSleep))
+				// Since Go 1.23 a receive after Reset cannot deliver a value
+				// from the previous setting, so Reset alone is enough.
+				timer.Reset(time.Until(timeSleep))
 			}
 
 		case <-timer.C:
-			stopTimer(timer)
 			c.expire()
 			timeSleep = time.Time{}
 		}
-	}
-}
-
-func restartTimer(t *time.Timer, d time.Duration) {
-	stopTimer(t)
-	t.Reset(d)
-}
-
-func stopTimer(t *time.Timer) {
-	t.Stop()
-
-	// go < 1.23 returns stale values on expired timers.
-	if len(t.C) != 0 {
-		<-t.C
 	}
 }
 
