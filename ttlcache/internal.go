@@ -13,9 +13,14 @@ func (c *Cache[K, V]) get(key K) (Item[V], bool) {
 
 // _g treats an entry past its deadline as missing: the sweep may lag, and a
 // read must not observe -- or resurrect -- an item that already timed out.
+// It reads the clock at most once, and not at all for NoTTL items.
 func (c *Cache[K, V]) _g(key K) (Item[V], bool) {
 	v, ok := c.m[key]
-	if !ok || v.expired(time.Now()) {
+	if !ok {
+		return Item[V]{}, false
+	}
+
+	if !v.t.IsZero() && !v.t.After(time.Now()) {
 		return Item[V]{}, false
 	}
 
@@ -28,8 +33,7 @@ func (c *Cache[K, V]) _g(key K) (Item[V], bool) {
 // that landed in between get overwritten by the stale copy.
 func (c *Cache[K, V]) getRefresh(key K) (Item[V], bool) {
 	c.l.RLock()
-	it, ok := c._g(key)
-	needs := ok && c.needsRefresh(it)
+	it, ok, needs := c.lookRefresh(key)
 	c.l.RUnlock()
 
 	if !needs {
@@ -40,18 +44,39 @@ func (c *Cache[K, V]) getRefresh(key K) (Item[V], bool) {
 	defer c.l.Unlock()
 
 	// the item may have been replaced or deleted while the lock was upgraded.
-	it, ok = c._g(key)
-	if !ok || !c.needsRefresh(it) {
+	it, ok, needs = c.lookRefresh(key)
+	if !needs {
 		return it, ok
 	}
 
-	return c._s(key, it), true
+	return c._s(key, it, time.Now()), true
+}
+
+// lookRefresh reports the item under key, whether it is live, and whether it
+// needs its expiration pushed forward, reading the clock at most once -- and
+// not at all for misses and NoTTL items.
+func (c *Cache[K, V]) lookRefresh(key K) (Item[V], bool, bool) {
+	it, ok := c.m[key]
+	if !ok {
+		return Item[V]{}, false, false
+	}
+
+	if it.t.IsZero() {
+		return it, true, false // NoTTL: never expires, never refreshes.
+	}
+
+	now := time.Now()
+	if !it.t.After(now) {
+		return Item[V]{}, false, false // expired; see _g.
+	}
+
+	return it, true, c.needsRefresh(it, now)
 }
 
 // needsRefresh reports whether a Get should push the item's expiration
 // forward. Refreshes are batched to the cache resolution, capped at half the
 // item's own TTL, so hot keys do not take the write lock on every read.
-func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
+func (c *Cache[K, V]) needsRefresh(it Item[V], now time.Time) bool {
 	if c.o.noUpdateTime || it.t.IsZero() {
 		return false
 	}
@@ -61,7 +86,7 @@ func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
 		res = h
 	}
 
-	_, t := c.getDuration(it.d)
+	_, t := c.getDuration(it.d, now)
 	return t.Sub(it.t) > res
 }
 
@@ -73,15 +98,20 @@ func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
 // replacement.
 func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 	c.l.Lock()
+	// the clock is read under the lock so stamps are monotone in lock order:
+	// sampled outside, a writer that queued longer stores an earlier deadline
+	// than next, and the pointless wake signals convoy the loop against the
+	// writers.
+	now := time.Now()
 	old, displaced := c.m[key]
 	reason := ReasonReplaced
-	if displaced && old.expired(time.Now()) {
+	if displaced && old.expired(now) {
 		// classified at removal, while the lock is still held: judging after
 		// the unlock would let a deadline passing in between report a value
 		// that was displaced live as timed out.
 		reason = ReasonTimedOut
 	}
-	it = c._s(key, it)
+	it = c._s(key, it, now)
 	c.l.Unlock()
 
 	if displaced && c.deallocationFn != nil {
@@ -91,8 +121,8 @@ func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 	return it
 }
 
-func (c *Cache[K, V]) _s(key K, it Item[V]) Item[V] {
-	it.d, it.t = c.getDuration(it.d)
+func (c *Cache[K, V]) _s(key K, it Item[V], now time.Time) Item[V] {
+	it.d, it.t = c.getDuration(it.d, now)
 	c.m[key] = it
 
 	if !it.t.IsZero() && (c.next.IsZero() || c.next.After(it.t)) {
@@ -139,7 +169,7 @@ func (c *Cache[K, V]) getOrSet(key K, it Item[V]) (Item[V], bool) {
 	}
 
 	old, displaced := c.m[key]
-	it = c._s(key, it)
+	it = c._s(key, it, time.Now())
 	c.l.Unlock()
 
 	if displaced && c.deallocationFn != nil {
@@ -205,13 +235,13 @@ func (c *Cache[K, V]) close() {
 	<-c.done
 }
 
-func (c *Cache[K, V]) getDuration(d time.Duration) (time.Duration, time.Time) {
+func (c *Cache[K, V]) getDuration(d time.Duration, now time.Time) (time.Duration, time.Time) {
 	switch d {
 	case NoTTL:
 	case DefaultTTL:
-		return c.o.defaultTTL, time.Now().Add(c.o.defaultTTL)
+		return c.o.defaultTTL, now.Add(c.o.defaultTTL)
 	default:
-		return d, time.Now().Add(d)
+		return d, now.Add(d)
 	}
 
 	return NoTTL, time.Time{}
