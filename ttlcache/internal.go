@@ -116,7 +116,7 @@ func (c *Cache[K, V]) delete(key K, reason DeallocationReason) {
 	c.l.Lock()
 	defer c.l.Unlock()
 
-	if c.o.deallocationFunc != nil {
+	if c.deallocationFn != nil {
 		var ok bool
 		v, ok = c.m[key]
 		if !ok {
@@ -130,8 +130,8 @@ func (c *Cache[K, V]) delete(key K, reason DeallocationReason) {
 func (c *Cache[K, V]) deleteUnsafe(key K, v Item[V], reason DeallocationReason) {
 	delete(c.m, key)
 
-	if c.o.deallocationFunc != nil {
-		c.o.deallocationFunc(key, v.v, reason)
+	if c.deallocationFn != nil {
+		c.deallocationFn(key, v.v, reason)
 	}
 }
 

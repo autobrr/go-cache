@@ -4,16 +4,32 @@
 package ttlcache
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/autobrr/go-cache/timecache"
 )
 
-func New[K comparable, V any](options Options[K, V]) *Cache[K, V] {
+func New[K comparable, V any](opts ...Option) *Cache[K, V] {
+	var options Options
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	c := Cache[K, V]{
 		o:  options,
 		ch: make(chan time.Time, 1000),
 		m:  make(map[K]Item[V]),
+	}
+
+	if options.deallocationFunc != nil {
+		f, ok := options.deallocationFunc.(DeallocationFunc[K, V])
+		if !ok {
+			panic(fmt.Sprintf("ttlcache: SetDeallocationFunc was given a %T, but this cache needs a %T",
+				options.deallocationFunc, DeallocationFunc[K, V](nil)))
+		}
+
+		c.deallocationFn = f
 	}
 
 	if options.defaultTTL != NoTTL && options.defaultResolution == 0 {
@@ -98,22 +114,37 @@ func (i *Item[V]) GetValue() V {
 	return i.getValue()
 }
 
-func (o Options[K, V]) SetTimerResolution(d time.Duration) Options[K, V] {
-	o.defaultResolution = d
-	return o
+// SetTimerResolution sets how coarsely the cache reads the clock. It defaults
+// to half the default TTL.
+func SetTimerResolution(d time.Duration) Option {
+	return func(o *Options) {
+		o.defaultResolution = d
+	}
 }
 
-func (o Options[K, V]) SetDefaultTTL(d time.Duration) Options[K, V] {
-	o.defaultTTL = d
-	return o
+// SetDefaultTTL sets the duration applied to items stored with DefaultTTL.
+func SetDefaultTTL(d time.Duration) Option {
+	return func(o *Options) {
+		o.defaultTTL = d
+	}
 }
 
-func (o Options[K, V]) SetDeallocationFunc(f DeallocationFunc[K, V]) Options[K, V] {
-	o.deallocationFunc = f
-	return o
+// DisableUpdateTime stops a Get from extending the item's expiration.
+func DisableUpdateTime(val bool) Option {
+	return func(o *Options) {
+		o.noUpdateTime = val
+	}
 }
 
-func (o Options[K, V]) DisableUpdateTime(val bool) Options[K, V] {
-	o.noUpdateTime = val
-	return o
+// SetDeallocationFunc registers f to run whenever an item leaves the cache,
+// whether it timed out or was deleted.
+//
+// K and V are inferred from f, so the call site never spells them out. Unlike
+// the other options this one cannot be checked at compile time: Options is not
+// generic, so f travels as any and New binds it to the cache's own K and V.
+// A callback that disagrees with the cache panics there, at construction.
+func SetDeallocationFunc[K comparable, V any](f DeallocationFunc[K, V]) Option {
+	return func(o *Options) {
+		o.deallocationFunc = f
+	}
 }

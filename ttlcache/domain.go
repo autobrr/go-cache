@@ -14,12 +14,13 @@ const NoTTL time.Duration = 0
 const DefaultTTL time.Duration = time.Nanosecond * 1
 
 type Cache[K comparable, V any] struct {
-	tc     timecache.Cache
-	l      sync.RWMutex
-	o      Options[K, V]
-	ch     chan time.Time
-	m      map[K]Item[V]
-	closed bool
+	tc             timecache.Cache
+	l              sync.RWMutex
+	o              Options
+	ch             chan time.Time
+	m              map[K]Item[V]
+	deallocationFn DeallocationFunc[K, V]
+	closed         bool
 }
 
 type Item[V any] struct {
@@ -28,12 +29,21 @@ type Item[V any] struct {
 	v V
 }
 
-type Options[K comparable, V any] struct {
+// Options carries the settings an Option can reach. It is deliberately not
+// generic: that is what lets Option be a plain func(*Options), so options need
+// no type arguments at the call site. The price is that a deallocation func
+// has nowhere typed to live here, and is held as any until New binds it to the
+// cache's own K and V.
+type Options struct {
 	defaultTTL        time.Duration
 	defaultResolution time.Duration
-	deallocationFunc  DeallocationFunc[K, V]
 	noUpdateTime      bool
+	deallocationFunc  any // DeallocationFunc[K, V], bound in New.
 }
+
+// Option configures a Cache at construction. See SetDefaultTTL,
+// SetTimerResolution and DisableUpdateTime.
+type Option func(*Options)
 
 type DeallocationReason int
 

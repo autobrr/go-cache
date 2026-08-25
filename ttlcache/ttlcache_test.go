@@ -4,6 +4,7 @@
 package ttlcache
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,7 +13,7 @@ import (
 
 func TestGet(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(1 * time.Second))
+	c := New[int, bool](SetDefaultTTL(1 * time.Second))
 	defer c.Close()
 
 	for i := 0; i < 10; i++ {
@@ -31,7 +32,7 @@ func TestGet(t *testing.T) {
 
 func TestExpirations(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(200 * time.Millisecond))
+	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
 	defer c.Close()
 	for i := 0; i < 10; i++ {
 		c.Set(i, true, DefaultTTL)
@@ -48,7 +49,7 @@ func TestExpirations(t *testing.T) {
 
 func TestSwaps(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(200 * time.Millisecond))
+	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
 	defer c.Close()
 	for i := 0; i < 10; i++ {
 		c.Set(i, true, DefaultTTL)
@@ -71,7 +72,7 @@ func TestSwaps(t *testing.T) {
 
 func TestRetimer(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(200 * time.Millisecond))
+	c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
 	defer c.Close()
 	for i := 1; i < 10; i++ {
 		c.Set(i, true, time.Duration(10-i)*100*time.Millisecond)
@@ -87,7 +88,7 @@ func TestRetimer(t *testing.T) {
 
 func TestSchedule(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(1 * time.Second))
+	c := New[int, bool](SetDefaultTTL(1 * time.Second))
 	defer c.Close()
 	for i := 1; i < 10; i++ {
 		c.Set(i, true, time.Duration(i)*100*time.Millisecond)
@@ -103,7 +104,7 @@ func TestSchedule(t *testing.T) {
 
 func TestInterlace(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(100 * time.Millisecond))
+	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
 	defer c.Close()
 	swap := false
 	for i := 0; i < 10; i++ {
@@ -131,7 +132,7 @@ func TestInterlace(t *testing.T) {
 
 func TestReschedule(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(100 * time.Millisecond))
+	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
 	defer c.Close()
 	for i := 1; i < 10; i++ {
 		c.Set(i, true, NoTTL)
@@ -148,7 +149,7 @@ func TestReschedule(t *testing.T) {
 
 func TestRescheduleNoTTL(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(100 * time.Millisecond))
+	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
 	defer c.Close()
 	for i := 1; i < 10; i++ {
 		c.Set(i, true, DefaultTTL)
@@ -165,7 +166,7 @@ func TestRescheduleNoTTL(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(100 * time.Millisecond))
+	c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
 	defer c.Close()
 	for i := 1; i < 10; i++ {
 		c.Set(i, true, NoTTL)
@@ -182,11 +183,10 @@ func TestDelete(t *testing.T) {
 func TestDeallocationTimeout(t *testing.T) {
 	t.Parallel()
 	var hit atomic.Bool // the deallocation runs on the expiration goroutine.
-	o := Options[int, bool]{}.
-		SetDefaultTTL(time.Millisecond * 100).
-		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit.Store(reason == ReasonTimedOut) })
-
-	c := New[int, bool](o)
+	c := New[int, bool](
+		SetDefaultTTL(time.Millisecond*100),
+		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit.Store(reason == ReasonTimedOut) }),
+	)
 	defer c.Close()
 
 	for i := 0; i < 1; i++ {
@@ -202,11 +202,10 @@ func TestDeallocationTimeout(t *testing.T) {
 func TestDeallocationDeleted(t *testing.T) {
 	t.Parallel()
 	hit := false
-	o := Options[int, bool]{}.
-		SetDefaultTTL(time.Millisecond * 100).
-		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit = reason == ReasonDeleted })
-
-	c := New[int, bool](o)
+	c := New[int, bool](
+		SetDefaultTTL(time.Millisecond*100),
+		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { hit = reason == ReasonDeleted }),
+	)
 	defer c.Close()
 
 	for i := 0; i < 1; i++ {
@@ -224,9 +223,10 @@ func TestTimerReset(t *testing.T) {
 	ch := make(chan struct{})
 	defer close(ch)
 
-	c := New[int, bool](Options[int, bool]{}.
-		SetDefaultTTL(time.Millisecond * 100).
-		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { ch <- struct{}{} }))
+	c := New[int, bool](
+		SetDefaultTTL(time.Millisecond*100),
+		SetDeallocationFunc(func(key int, value bool, reason DeallocationReason) { ch <- struct{}{} }),
+	)
 
 	defer c.Close()
 
@@ -254,9 +254,10 @@ func TestGetDoesNotClobberSet(t *testing.T) {
 
 	// A fine timer resolution makes the TTL refresh in GetItem fire on nearly
 	// every Get, which is what exposes the read-then-write race.
-	c := New[int, int](Options[int, int]{}.
-		SetDefaultTTL(time.Minute).
-		SetTimerResolution(10 * time.Microsecond))
+	c := New[int, int](
+		SetDefaultTTL(time.Minute),
+		SetTimerResolution(10*time.Microsecond),
+	)
 
 	defer c.Close()
 
@@ -291,7 +292,7 @@ func TestGetDoesNotClobberSet(t *testing.T) {
 
 func TestGetKeys(t *testing.T) {
 	t.Parallel()
-	c := New[int, bool](Options[int, bool]{}.SetDefaultTTL(1 * time.Second))
+	c := New[int, bool](SetDefaultTTL(1 * time.Second))
 	defer c.Close()
 
 	const count = 10
@@ -324,7 +325,7 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 	// takes the same write lock a Set holds while it nudges the wake channel.
 	// Enough concurrent writers starve the loop at that lock long enough for
 	// the channel to fill behind it.
-	c := New[int, int](Options[int, int]{}.SetDefaultTTL(2 * time.Millisecond))
+	c := New[int, int](SetDefaultTTL(2 * time.Millisecond))
 
 	const writers = 8
 	const perWriter = 25000
@@ -363,4 +364,24 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 		// Close would block on the held lock too, so leave the cache alone.
 		t.Fatal("deadlock: Set is blocked sending on the wake channel while holding the write lock")
 	}
+}
+
+func TestDeallocationFuncTypeMismatchPanics(t *testing.T) {
+	t.Parallel()
+
+	// K and V are inferred from the callback, so a callback written against
+	// different types than the cache cannot be caught until New binds it.
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected a panic from a mismatched deallocation func")
+		}
+
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "SetDeallocationFunc") {
+			t.Fatalf("panic should name the offending option, got: %v", r)
+		}
+	}()
+
+	New[int, bool](SetDeallocationFunc(func(key string, value int, reason DeallocationReason) {}))
 }
