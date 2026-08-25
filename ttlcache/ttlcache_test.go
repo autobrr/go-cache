@@ -412,6 +412,75 @@ func TestDeallocationReentrancy(t *testing.T) {
 	}
 }
 
+func TestExplicitTTLFinerThanResolution(t *testing.T) {
+	t.Parallel()
+
+	// A coarse default TTL used to drag short explicit TTLs up to its derived
+	// resolution: a 200ms item in this cache lived for seconds.
+	c := New[int, int](
+		SetDefaultTTL(10*time.Second),
+		DisableUpdateTime(true),
+	)
+	defer c.Close()
+
+	c.Set(1, 1, 200*time.Millisecond)
+	if _, ok := c.Get(1); !ok {
+		t.Fatal("item missing right after Set")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := c.Get(1); !ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("item with a 200ms TTL still alive after 2s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestExplicitTTLNoOptions(t *testing.T) {
+	t.Parallel()
+
+	// Without a default TTL the clock used to fall back to one-second
+	// rounding, so sub-second TTLs were honored a second late.
+	c := New[int, int](DisableUpdateTime(true))
+	defer c.Close()
+
+	c.Set(1, 1, 100*time.Millisecond)
+
+	deadline := time.Now().Add(800 * time.Millisecond)
+	for {
+		if _, ok := c.Get(1); !ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("item with a 100ms TTL still alive after 800ms")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestShortTTLStillSlides(t *testing.T) {
+	t.Parallel()
+
+	// Refresh batching is capped at half the item's own TTL, so an item finer
+	// than the cache resolution still has its expiration pushed by Get.
+	c := New[int, int](SetDefaultTTL(10 * time.Second))
+	defer c.Close()
+
+	c.Set(1, 1, time.Second)
+
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, ok := c.Get(1); !ok {
+			t.Fatal("item expired while being read")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestDeallocationFuncTypeMismatchPanics(t *testing.T) {
 	t.Parallel()
 

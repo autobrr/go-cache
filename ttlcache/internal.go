@@ -46,13 +46,21 @@ func (c *Cache[K, V]) getRefresh(key K) (Item[V], bool) {
 	return c._s(key, it), true
 }
 
+// needsRefresh reports whether a Get should push the item's expiration
+// forward. Refreshes are batched to the cache resolution, capped at half the
+// item's own TTL, so hot keys do not take the write lock on every read.
 func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
 	if c.o.noUpdateTime || it.t.IsZero() {
 		return false
 	}
 
+	res := c.res
+	if h := it.d / 2; h < res {
+		res = h
+	}
+
 	_, t := c.getDuration(it.d)
-	return t.After(it.t)
+	return t.Sub(it.t) > res
 }
 
 func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
@@ -158,9 +166,9 @@ func (c *Cache[K, V]) getDuration(d time.Duration) (time.Duration, time.Time) {
 	switch d {
 	case NoTTL:
 	case DefaultTTL:
-		return c.o.defaultTTL, c.tc.Now().Add(c.o.defaultTTL)
+		return c.o.defaultTTL, time.Now().Add(c.o.defaultTTL)
 	default:
-		return d, c.tc.Now().Add(d)
+		return d, time.Now().Add(d)
 	}
 
 	return NoTTL, time.Time{}

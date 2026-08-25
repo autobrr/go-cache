@@ -6,8 +6,6 @@ package ttlcache
 import (
 	"fmt"
 	"time"
-
-	"github.com/autobrr/go-cache/timecache"
 )
 
 func New[K comparable, V any](opts ...Option) *Cache[K, V] {
@@ -32,10 +30,14 @@ func New[K comparable, V any](opts ...Option) *Cache[K, V] {
 		c.deallocationFn = f
 	}
 
-	if options.defaultTTL != NoTTL && options.defaultResolution == 0 {
-		c.tc = *timecache.New(timecache.Options{}.Round(options.defaultTTL / 2))
-	} else if options.defaultResolution != 0 {
-		c.tc = *timecache.New(timecache.Options{}.Round(options.defaultResolution))
+	// an unset resolution follows the default TTL; without either, batch
+	// refreshes to a second.
+	c.res = options.defaultResolution
+	if c.res == 0 {
+		c.res = options.defaultTTL / 2
+	}
+	if c.res <= 0 {
+		c.res = time.Second
 	}
 
 	go c.startExpirations()
@@ -114,8 +116,8 @@ func (i *Item[V]) GetValue() V {
 	return i.getValue()
 }
 
-// SetTimerResolution sets how coarsely the cache reads the clock. It defaults
-// to half the default TTL.
+// SetTimerResolution sets how often a Get may push an item's expiration
+// forward. It defaults to half the default TTL.
 func SetTimerResolution(d time.Duration) Option {
 	return func(o *Options) {
 		o.defaultResolution = d

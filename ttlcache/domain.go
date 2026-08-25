@@ -6,17 +6,15 @@ package ttlcache
 import (
 	"sync"
 	"time"
-
-	"github.com/autobrr/go-cache/timecache"
 )
 
 const NoTTL time.Duration = 0
 const DefaultTTL time.Duration = time.Nanosecond * 1
 
 type Cache[K comparable, V any] struct {
-	tc             timecache.Cache
 	l              sync.RWMutex
 	o              Options
+	res            time.Duration // refresh batching granularity; see SetTimerResolution.
 	ch             chan time.Time
 	m              map[K]Item[V]
 	deallocationFn DeallocationFunc[K, V]

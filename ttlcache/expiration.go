@@ -24,7 +24,7 @@ func (c *Cache[K, V]) startExpirations() {
 
 			if timeSleep.IsZero() || timeSleep.After(t) {
 				timeSleep = t
-				restartTimer(timer, timeSleep.Sub(c.tc.Now()))
+				restartTimer(timer, time.Until(timeSleep))
 			}
 
 		case <-timer.C:
@@ -53,7 +53,7 @@ func stopTimer(t *time.Timer) {
 // deallocation callbacks run after the lock is released so they may call back
 // into the cache; see delete.
 func (c *Cache[K, V]) expire() {
-	t := c.tc.Now()
+	t := time.Now()
 	var soon time.Time
 	var timedOut []deallocation[K, V]
 
