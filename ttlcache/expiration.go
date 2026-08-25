@@ -12,33 +12,37 @@ func (c *Cache[K, V]) startExpirations() {
 	timer.Stop() // wasteful, but makes the loop cleaner because this is initialized.
 	defer timer.Stop()
 
-	var timeSleep time.Time
 	for {
 		select {
-		case t, ok := <-c.ch:
+		case _, ok := <-c.ch:
 			if !ok {
 				return
-			} else if t.IsZero() {
-				continue
-			}
-
-			if timeSleep.IsZero() || timeSleep.After(t) {
-				timeSleep = t
-				// Since Go 1.23 a receive after Reset cannot deliver a value
-				// from the previous setting, so Reset alone is enough.
-				timer.Reset(time.Until(timeSleep))
 			}
 
 		case <-timer.C:
 			c.expire()
-			timeSleep = time.Time{}
+		}
+
+		// re-arm from the earliest known deadline, whether a store just
+		// lowered it or a sweep just recomputed it. Since Go 1.23 a receive
+		// after Reset cannot deliver a value from the previous setting, so
+		// Reset alone is enough.
+		c.l.RLock()
+		next := c.next
+		c.l.RUnlock()
+
+		if next.IsZero() {
+			timer.Stop()
+		} else {
+			timer.Reset(time.Until(next))
 		}
 	}
 }
 
-// expire sweeps the map and removes every item whose time has passed. The
-// deallocation callbacks run after the lock is released so they may call back
-// into the cache; see delete.
+// expire sweeps the map, removes every item whose time has passed, and
+// leaves the earliest surviving deadline in next for the loop to re-arm
+// from. The deallocation callbacks run after the lock is released so they
+// may call back into the cache; see delete.
 func (c *Cache[K, V]) expire() {
 	t := time.Now()
 	var soon time.Time
@@ -60,7 +64,7 @@ func (c *Cache[K, V]) expire() {
 			timedOut = append(timedOut, deallocation[K, V]{key: k, value: v.v})
 		}
 	}
-	c.wake(soon) // wake-up feedback loop
+	c.next = soon
 	c.l.Unlock()
 
 	for _, d := range timedOut {

@@ -11,13 +11,15 @@ func (c *Cache[K, V]) get(key K) (Item[V], bool) {
 	return c._g(key)
 }
 
+// _g treats an entry past its deadline as missing: the sweep may lag, and a
+// read must not observe -- or resurrect -- an item that already timed out.
 func (c *Cache[K, V]) _g(key K) (Item[V], bool) {
 	v, ok := c.m[key]
-	if !ok {
-		return v, ok
+	if !ok || v.expired(time.Now()) {
+		return Item[V]{}, false
 	}
 
-	return v, ok
+	return v, true
 }
 
 // getRefresh returns the item stored under key and pushes its expiration
@@ -64,17 +66,24 @@ func (c *Cache[K, V]) needsRefresh(it Item[V]) bool {
 }
 
 // set stores it under key and hands any displaced value to the deallocation
-// callback outside the lock, as ReasonReplaced. getRefresh deliberately
+// callback outside the lock. A displaced value that was still live is
+// reported as replaced; one whose deadline had already passed timed out, the
+// store merely collected it before the sweep did. getRefresh deliberately
 // bypasses this by calling _s directly: re-stamping an item is not a
 // replacement.
 func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 	c.l.Lock()
-	old, replaced := c.m[key]
+	old, displaced := c.m[key]
 	it = c._s(key, it)
 	c.l.Unlock()
 
-	if replaced && c.deallocationFn != nil {
-		c.deallocationFn(key, old.v, ReasonReplaced)
+	if displaced && c.deallocationFn != nil {
+		reason := ReasonReplaced
+		if old.expired(time.Now()) {
+			reason = ReasonTimedOut
+		}
+
+		c.deallocationFn(key, old.v, reason)
 	}
 
 	return it
@@ -83,53 +92,59 @@ func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 func (c *Cache[K, V]) _s(key K, it Item[V]) Item[V] {
 	it.d, it.t = c.getDuration(it.d)
 	c.m[key] = it
-	c.wake(it.t)
+
+	if !it.t.IsZero() && (c.next.IsZero() || c.next.After(it.t)) {
+		c.next = it.t
+		c.wake()
+	}
+
 	return it
 }
 
-// wake nudges the expiration loop to reconsider when it next sweeps.
+// wake nudges the expiration loop to re-read next.
 //
 // The send must not block. Callers hold the write lock and the loop takes that
 // same lock in expire(), so a blocking send deadlocks the two against each
 // other as soon as the channel fills: the sender waits for room while the loop
 // waits for the lock.
 //
-// Dropping a nudge costs precision, not correctness. A full channel means a
-// thousand wake-ups are already queued, so a sweep is coming regardless, and
-// expire() re-derives the next wake-up from a full scan of the map. The worst
-// case is that this item is collected on that sweep instead of exactly on time.
+// Dropping the send is safe in a way it was not when the channel carried
+// deadlines: next is updated under the lock before the send is attempted, so
+// a full channel means a signal is already pending, and whenever the loop
+// gets to it, it re-reads a next that includes this caller's update.
 //
 // Callers must hold the write lock; that is what makes the closed check sound
 // against a concurrent close, and the send after it safe.
-func (c *Cache[K, V]) wake(t time.Time) {
+func (c *Cache[K, V]) wake() {
 	if c.closed {
 		return // the loop is gone; nothing left to wake.
 	}
 
-	if t.IsZero() {
-		return // NoTTL never expires, and the loop discards these anyway.
-	}
-
 	select {
-	case c.ch <- t:
+	case c.ch <- struct{}{}:
 	default:
 	}
 }
 
+// getOrSet returns the existing item and true, or stores it and returns the
+// new item and false. Storing displaces at most an expired corpse the read
+// treated as missing; it is handed to the deallocation callback as a timeout.
 func (c *Cache[K, V]) getOrSet(key K, it Item[V]) (Item[V], bool) {
 	c.l.Lock()
-	defer c.l.Unlock()
-	return c._gos(key, it)
-}
-
-// _gos returns the existing item and true, or stores it and returns the new
-// item and false. Storing never displaces anything, so no deallocation runs.
-func (c *Cache[K, V]) _gos(key K, it Item[V]) (Item[V], bool) {
 	if g, ok := c._g(key); ok {
+		c.l.Unlock()
 		return g, true
 	}
 
-	return c._s(key, it), false
+	old, displaced := c.m[key]
+	it = c._s(key, it)
+	c.l.Unlock()
+
+	if displaced && c.deallocationFn != nil {
+		c.deallocationFn(key, old.v, ReasonTimedOut)
+	}
+
+	return it, false
 }
 
 // delete removes key and then runs the deallocation callback outside the
@@ -147,6 +162,10 @@ func (c *Cache[K, V]) delete(key K, reason DeallocationReason) {
 	c.l.Unlock()
 
 	if c.deallocationFn != nil {
+		if v.expired(time.Now()) {
+			reason = ReasonTimedOut
+		}
+
 		c.deallocationFn(key, v.v, reason)
 	}
 }
@@ -155,8 +174,13 @@ func (c *Cache[K, V]) getkeys() []K {
 	c.l.RLock()
 	defer c.l.RUnlock()
 
+	now := time.Now()
 	keys := make([]K, 0, len(c.m))
-	for k := range c.m {
+	for k, v := range c.m {
+		if v.expired(now) {
+			continue
+		}
+
 		keys = append(keys, k)
 	}
 
@@ -185,6 +209,12 @@ func (c *Cache[K, V]) getDuration(d time.Duration) (time.Duration, time.Time) {
 	}
 
 	return NoTTL, time.Time{}
+}
+
+// expired reports whether the item's deadline has passed; NoTTL items never
+// expire.
+func (i Item[V]) expired(now time.Time) bool {
+	return !i.t.IsZero() && !i.t.After(now)
 }
 
 func (i *Item[V]) getDuration() time.Duration {

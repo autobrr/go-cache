@@ -600,6 +600,153 @@ func TestDeallocationReentrancy(t *testing.T) {
 	c.Close()
 }
 
+func TestDroppedWakeUpDoesNotStrandShortTTL(t *testing.T) {
+	t.Parallel()
+
+	// A timeout callback that blocks stalls the loop without holding the
+	// lock, so writers can fill the wake channel behind it with far-future
+	// deadlines. The dropped nudge for a short-TTL item set at that moment
+	// must not strand its collection until those deadlines.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var first atomic.Bool
+	var swept atomic.Bool
+
+	c := New[int, int](
+		SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {
+			if first.CompareAndSwap(false, true) {
+				close(entered)
+				<-release
+				return
+			}
+			if key == 7 {
+				swept.Store(true)
+			}
+		}),
+	)
+	defer c.Close()
+
+	c.Set(0, 0, 5*time.Millisecond)
+	<-entered
+
+	for i := range 1100 {
+		c.Set(1000+i, i, time.Hour)
+	}
+
+	c.Set(7, 7, 5*time.Millisecond)
+	close(release)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !swept.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the 5ms item was not collected; its wake-up was lost behind hour-long deadlines")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestGetTreatsExpiredAsMissing(t *testing.T) {
+	t.Parallel()
+
+	// While the sweep is stalled in a blocked callback, an entry past its
+	// deadline must read as missing everywhere and must not be refreshed
+	// back to life.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var first atomic.Bool
+
+	c := New[int, int](
+		SetDefaultTTL(time.Minute), // refresh stays enabled
+		SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {
+			if first.CompareAndSwap(false, true) {
+				close(entered)
+				<-release
+			}
+		}),
+	)
+	defer c.Close()
+	defer close(release)
+
+	c.Set(0, 0, 5*time.Millisecond)
+	<-entered
+
+	c.Set(8, 8, 5*time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+
+	if _, ok := c.Get(8); ok {
+		t.Fatal("Get returned an entry past its deadline")
+	}
+
+	if it, ok := c.GetItem(8); ok || !it.GetTime().IsZero() {
+		t.Fatal("GetItem returned or refreshed an entry past its deadline")
+	}
+
+	if slices.Contains(c.GetKeys(), 8) {
+		t.Fatal("GetKeys still lists an entry past its deadline")
+	}
+
+	for k := range c.All() {
+		if k == 8 {
+			t.Fatal("All yielded an entry past its deadline")
+		}
+	}
+}
+
+func TestStoreOverExpiredDeallocatesTimedOut(t *testing.T) {
+	t.Parallel()
+
+	// A Set, GetOrSet, or Delete landing on an expired-but-unswept entry
+	// must still hand the corpse to the deallocation callback, as a timeout.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var first atomic.Bool
+	reasons := make(chan DeallocationReason, 4)
+
+	c := New[int, int](
+		DisableUpdateTime(true),
+		SetDeallocationFunc(func(key int, value int, reason DeallocationReason) {
+			if first.CompareAndSwap(false, true) {
+				close(entered)
+				<-release
+				return
+			}
+			reasons <- reason
+		}),
+	)
+	defer c.Close()
+	defer close(release)
+
+	c.Set(0, 0, 5*time.Millisecond)
+	<-entered
+
+	c.Set(9, 9, 5*time.Millisecond)
+	c.Set(10, 10, 5*time.Millisecond)
+	c.Set(11, 11, 5*time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+
+	c.Set(9, 90, NoTTL)        // displaces the corpse under 9
+	c.GetOrSet(10, 100, NoTTL) // reads 10 as missing, displaces its corpse
+	c.Delete(11)               // removes the corpse under 11
+
+	for range 3 {
+		select {
+		case r := <-reasons:
+			if r != ReasonTimedOut {
+				t.Fatalf("corpse removal reported %v, want ReasonTimedOut", r)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a removed expired value never reached the deallocation callback")
+		}
+	}
+
+	if v, _ := c.Get(9); v != 90 {
+		t.Fatalf("key 9 should hold 90, got: %d", v)
+	}
+	if v, _ := c.Get(10); v != 100 {
+		t.Fatalf("key 10 should hold 100, got: %d", v)
+	}
+}
+
 func TestGetOrSet(t *testing.T) {
 	t.Parallel()
 	c := New[int, int](SetDefaultTTL(time.Minute))

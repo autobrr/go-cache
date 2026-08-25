@@ -18,7 +18,8 @@ type Cache[K comparable, V any] struct {
 	l              sync.RWMutex
 	o              Options
 	res            time.Duration // refresh batching granularity; see SetTimerResolution.
-	ch             chan time.Time
+	next           time.Time     // earliest deadline of any stored item; guarded by l. Stale-early after deletes, never late.
+	ch             chan struct{} // coalesced wake signal for the expiration loop; see wake.
 	m              map[K]Item[V]
 	deallocationFn DeallocationFunc[K, V]
 	closed         bool
@@ -71,7 +72,7 @@ func New[K comparable, V any](opts ...Option) *Cache[K, V] {
 
 	c := Cache[K, V]{
 		o:  options,
-		ch: make(chan time.Time, 1000),
+		ch: make(chan struct{}, 1),
 		m:  make(map[K]Item[V]),
 	}
 
@@ -164,10 +165,12 @@ func (c *Cache[K, V]) Keys() iter.Seq[K] {
 	return slices.Values(c.getkeys())
 }
 
-// All returns an iterator over the key/value pairs in the cache. Entries that
-// left the cache between the snapshot and the body reaching them are skipped.
-// Like Get, that means removed, not stale: an entry past its TTL that the
-// sweep has not collected yet is still yielded.
+// All returns an iterator over the key/value pairs in the cache. The keys are
+// a snapshot taken when All is called; each value is fetched as the body
+// reaches its key, so an entry that left the cache in between is skipped, and
+// a key deleted and stored again yields its current value, not the one from
+// snapshot time. An entry past its deadline counts as gone, like everywhere
+// else.
 //
 // Unlike Get, iterating does not push expirations forward: ranging over the
 // cache to inspect it would otherwise slide every item's TTL.
@@ -233,6 +236,8 @@ func DisableUpdateTime(val bool) Option {
 // cache's lock, so it may call back into the cache; timeouts invoke it on the
 // expiration goroutine. Re-storing a value that is already cached counts as
 // replacing it, and items still in the cache at Close are not deallocated.
+// A value whose deadline had already passed is always reported as timed out,
+// however it left the cache.
 //
 // K and V are inferred from f, so the call site never spells them out. Unlike
 // the other options this one cannot be checked at compile time: Options is not

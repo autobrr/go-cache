@@ -14,9 +14,10 @@ go get github.com/autobrr/go-cache
 An in-memory generic TTL cache with a single background expiration goroutine.
 
 - per-item TTLs, a configurable default, and `NoTTL` for items that never expire
+- reads never return an entry past its deadline, even before the sweep collects it
 - `Get` pushes an item's expiration forward (sliding TTL); disable with `DisableUpdateTime(true)`
 - a deallocation callback runs whenever an item times out, is deleted, or is displaced by a `Set`; it runs outside the cache lock, so it may call back into the cache
-- `Keys` and `All` iterate over a snapshot without holding the lock while the loop body runs
+- `Keys` and `All` iterate over a key snapshot without holding the lock while the loop body runs; `All` fetches each value at visit time, skipping entries that left in between
 - `GetOrSet` stores only when the key is absent and reports whether it found or stored; `GetItem` exposes the stored duration and deadline
 - `Close` stops the expiration goroutine
 
