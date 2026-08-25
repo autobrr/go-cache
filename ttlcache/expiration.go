@@ -68,12 +68,5 @@ func (c *Cache[K, V]) expire() {
 		c.deleteUnsafe(k, v, ReasonTimedOut)
 	}
 
-	if !soon.IsZero() { // wake-up feedback loop
-		go func(s time.Time) { // we need to release the lock, if the input pipeline has exceeded the wakeup budget.
-			defer func() {
-				_ = recover() // if the channel is closed, this doesn't matter on shutdown because this is expected.
-			}()
-			c.ch <- s
-		}(soon)
-	}
+	c.wake(soon) // wake-up feedback loop
 }

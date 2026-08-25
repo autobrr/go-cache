@@ -64,8 +64,37 @@ func (c *Cache[K, V]) set(key K, it Item[V]) Item[V] {
 func (c *Cache[K, V]) _s(key K, it Item[V]) Item[V] {
 	it.d, it.t = c.getDuration(it.d)
 	c.m[key] = it
-	c.ch <- it.t
+	c.wake(it.t)
 	return it
+}
+
+// wake nudges the expiration loop to reconsider when it next sweeps.
+//
+// The send must not block. Callers hold the write lock and the loop takes that
+// same lock in expire(), so a blocking send deadlocks the two against each
+// other as soon as the channel fills: the sender waits for room while the loop
+// waits for the lock.
+//
+// Dropping a nudge costs precision, not correctness. A full channel means a
+// thousand wake-ups are already queued, so a sweep is coming regardless, and
+// expire() re-derives the next wake-up from a full scan of the map. The worst
+// case is that this item is collected on that sweep instead of exactly on time.
+//
+// Callers must hold the write lock; that is what makes the closed check sound
+// against a concurrent close, and the send after it safe.
+func (c *Cache[K, V]) wake(t time.Time) {
+	if c.closed {
+		return // the loop is gone; nothing left to wake.
+	}
+
+	if t.IsZero() {
+		return // NoTTL never expires, and the loop discards these anyway.
+	}
+
+	select {
+	case c.ch <- t:
+	default:
+	}
 }
 
 func (c *Cache[K, V]) getOrSet(key K, it Item[V]) (Item[V], bool) {
@@ -121,6 +150,12 @@ func (c *Cache[K, V]) getkeys() []K {
 func (c *Cache[K, V]) close() {
 	c.l.Lock()
 	defer c.l.Unlock()
+
+	if c.closed {
+		return
+	}
+
+	c.closed = true
 	close(c.ch)
 }
 

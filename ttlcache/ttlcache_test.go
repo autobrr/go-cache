@@ -316,3 +316,51 @@ func TestGetKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
+	t.Parallel()
+
+	// A short TTL keeps the expiration loop cycling through expire(), which
+	// takes the same write lock a Set holds while it nudges the wake channel.
+	// Enough concurrent writers starve the loop at that lock long enough for
+	// the channel to fill behind it.
+	c := New[int, int](Options[int, int]{}.SetDefaultTTL(2 * time.Millisecond))
+
+	const writers = 8
+	const perWriter = 25000
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		for w := 0; w < writers; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				for i := 0; i < perWriter; i++ {
+					c.Set(w*perWriter+i, i, DefaultTTL)
+				}
+			}(w)
+		}
+		wg.Wait()
+	}()
+
+	select {
+	case <-done:
+		// A dropped nudge may delay collection, but every sweep re-derives the
+		// next wake-up from the whole map, so nothing is stranded.
+		deadline := time.Now().Add(30 * time.Second)
+		for len(c.GetKeys()) > 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		if n := len(c.GetKeys()); n != 0 {
+			t.Fatalf("%d entries never expired after dropped wake-ups", n)
+		}
+
+		c.Close()
+	case <-time.After(30 * time.Second):
+		// Close would block on the held lock too, so leave the cache alone.
+		t.Fatal("deadlock: Set is blocked sending on the wake channel while holding the write lock")
+	}
+}
