@@ -61,37 +61,22 @@ func (c *Cache[K, V]) getRefresh(key K) (Item[V], bool) {
 // separate leaves the read-only hit path free of write-back bookkeeping.
 func (c *Cache[K, V]) refresh(key K) (Item[V], bool) {
 	c.l.Lock()
-	// the item may have been replaced or deleted while the lock was upgraded.
-	it, ok, needs := c.lookRefresh(key)
-	if !needs {
-		c.l.Unlock()
-		return it, ok
-	}
+	defer c.l.Unlock()
 
-	it = c._s(key, it, time.Now())
-	c.l.Unlock()
-	return it, true
-}
-
-// lookRefresh reports the item under key, whether it is live, and whether it
-// needs its expiration pushed forward, reading the monotonic clock at most
-// once -- and not at all for misses and NoTTL items.
-func (c *Cache[K, V]) lookRefresh(key K) (Item[V], bool, bool) {
+	// the item may have been replaced, deleted, or expired while the lock was
+	// upgraded, so nothing from the read pass is trusted. The clock is read
+	// once, under the lock, and serves both the recheck and the new stamp.
+	now := time.Now()
 	it, ok := c.m[key]
-	if !ok {
-		return Item[V]{}, false, false
+	if !ok || it.expired(now) {
+		return Item[V]{}, false
 	}
 
-	if it.d == NoTTL {
-		return it, true, false // NoTTL: never expires, never refreshes.
+	if it.d == NoTTL || !c.needsRefresh(it, it.t.Sub(now)) {
+		return it, true
 	}
 
-	remaining := time.Until(it.t)
-	if remaining <= 0 {
-		return Item[V]{}, false, false // expired; see _g.
-	}
-
-	return it, true, c.needsRefresh(it, remaining)
+	return c._s(key, it, now), true
 }
 
 // needsRefresh reports whether a Get should push the item's expiration
@@ -183,16 +168,17 @@ func (c *Cache[K, V]) wake() {
 // treated as missing; it is handed to the deallocation callback as a timeout.
 func (c *Cache[K, V]) getOrSet(key K, it Item[V]) (Item[V], bool) {
 	c.l.Lock()
-	if g, ok := c._g(key); ok {
+	now := time.Now() // under the lock; see set.
+	old, present := c.m[key]
+	if present && !old.expired(now) {
 		c.l.Unlock()
-		return g, true
+		return old, true
 	}
 
-	old, displaced := c.m[key]
-	it = c._s(key, it, time.Now())
+	it = c._s(key, it, now)
 	c.l.Unlock()
 
-	if displaced && c.deallocationFn != nil {
+	if present && c.deallocationFn != nil {
 		c.deallocationFn(key, old.v, ReasonTimedOut)
 	}
 
@@ -255,16 +241,21 @@ func (c *Cache[K, V]) close() {
 	<-c.done
 }
 
+// getDuration resolves the TTL an item was stored with into the duration and
+// deadline it carries. DefaultTTL takes the configured default, and a default
+// of NoTTL means exactly that: resolving it here rather than at the public
+// entry points keeps every store path from minting an entry with no TTL but
+// a deadline.
 func (c *Cache[K, V]) getDuration(d time.Duration, now time.Time) (time.Duration, time.Time) {
-	switch d {
-	case NoTTL:
-	case DefaultTTL:
-		return c.o.defaultTTL, now.Add(c.o.defaultTTL)
-	default:
-		return d, now.Add(d)
+	if d == DefaultTTL {
+		d = c.o.defaultTTL
 	}
 
-	return NoTTL, time.Time{}
+	if d == NoTTL {
+		return NoTTL, time.Time{}
+	}
+
+	return d, now.Add(d)
 }
 
 // expired reports whether the item's deadline has passed; NoTTL items never

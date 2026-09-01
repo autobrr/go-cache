@@ -52,22 +52,68 @@ func TestDefaultTTLWithoutConfiguredDefaultIsNoTTL(t *testing.T) {
 	})
 }
 
+// sweeps records when the expiration loop handed each key to the deallocation
+// callback, so a test can assert on the sweep itself. Get and Keys hide an
+// entry past its deadline on their own, so a read cannot tell whether the loop
+// ever collected it: a timer that never re-arms passes every read-based check.
+// Other reasons are ignored; replacements and deletes have their own tests.
+type sweeps[K comparable, V any] struct {
+	mu sync.Mutex
+	at map[K]time.Time
+}
+
+func (s *sweeps[K, V]) record(key K, _ V, reason DeallocationReason) {
+	if reason != ReasonTimedOut {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.at == nil {
+		s.at = make(map[K]time.Time)
+	}
+	s.at[key] = time.Now()
+}
+
+// sweptAt returns when key was swept, or false if it never was.
+func (s *sweeps[K, V]) sweptAt(key K) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.at[key]
+	return at, ok
+}
+
+// expect fails t unless key was swept exactly at deadline. Under synctest the
+// clock only moves while the bubble is idle, so a sweep lands on its deadline
+// to the nanosecond; anything later means the timer was armed late.
+func (s *sweeps[K, V]) expect(t *testing.T, key K, deadline time.Time) {
+	t.Helper()
+
+	at, ok := s.sweptAt(key)
+	if !ok {
+		t.Fatalf("key %v was never swept", key)
+	}
+	if !at.Equal(deadline) {
+		t.Fatalf("key %v swept %s after its deadline", key, at.Sub(deadline))
+	}
+}
+
 func TestExpirations(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
+		var s sweeps[int, bool]
+		c := New[int, bool](SetDefaultTTL(200*time.Millisecond), SetDeallocationFunc(s.record))
 		defer c.Close()
+
+		start := time.Now()
 		for i := range 10 {
 			c.Set(i, true, DefaultTTL)
 		}
 
 		synctest.Sleep(1 * time.Second)
-
 		for i := range 10 {
-			if _, ok := c.Get(i); ok {
-				t.Fatalf("found key: %d", i)
-			}
+			s.expect(t, i, start.Add(200*time.Millisecond))
 		}
 	})
 }
@@ -76,24 +122,29 @@ func TestSwaps(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
+		var s sweeps[int, bool]
+		c := New[int, bool](SetDefaultTTL(200*time.Millisecond), SetDeallocationFunc(s.record))
 		defer c.Close()
+
+		start := time.Now()
 		for i := range 10 {
 			c.Set(i, true, DefaultTTL)
 		}
 
 		synctest.Sleep(1 * time.Second)
 		for i := range 10 {
-			if _, ok := c.Get(i); ok {
-				t.Fatalf("found key: %d", i)
-			}
+			s.expect(t, i, start.Add(200*time.Millisecond))
 		}
 
+		// the map is empty and the timer stopped; a new store must arm it again.
+		start = time.Now()
 		for i := 10; i < 20; i++ {
 			c.Set(i, true, DefaultTTL)
-			if _, ok := c.Get(i); !ok {
-				t.Fatalf("missing key: %d", i)
-			}
+		}
+
+		synctest.Sleep(1 * time.Second)
+		for i := 10; i < 20; i++ {
+			s.expect(t, i, start.Add(200*time.Millisecond))
 		}
 	})
 }
@@ -102,27 +153,29 @@ func TestRetimer(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		c := New[int, bool](SetDefaultTTL(200 * time.Millisecond))
+		var s sweeps[int, bool]
+		c := New[int, bool](SetDefaultTTL(200*time.Millisecond), SetDeallocationFunc(s.record))
 		defer c.Close()
+
+		start := time.Now()
 		for i := 1; i < 10; i++ {
 			c.Set(i, true, time.Duration(10-i)*100*time.Millisecond)
+			// let the loop arm from this deadline before a lower one lands;
+			// otherwise one coalesced wake carries the lowest of them and the
+			// re-arm is never exercised.
+			synctest.Wait()
 		}
 
 		// the shortest TTL was set last, so collecting key 9 on time requires
 		// the loop to re-arm its timer to the earlier deadline.
 		synctest.Sleep(150 * time.Millisecond)
-		if _, ok := c.Get(9); ok {
+		if _, ok := s.sweptAt(9); !ok {
 			t.Fatal("key 9 outlived its 100ms TTL; the timer was not re-armed to the earlier deadline")
-		}
-		if _, ok := c.Get(8); !ok {
-			t.Fatal("missing key: 8")
 		}
 
 		synctest.Sleep(2 * time.Second)
 		for i := 1; i < 10; i++ {
-			if _, ok := c.Get(i); ok {
-				t.Fatalf("found key: %d", i)
-			}
+			s.expect(t, i, start.Add(time.Duration(10-i)*100*time.Millisecond))
 		}
 	})
 }
@@ -131,17 +184,18 @@ func TestSchedule(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		c := New[int, bool](SetDefaultTTL(1 * time.Second))
+		var s sweeps[int, bool]
+		c := New[int, bool](SetDefaultTTL(1*time.Second), SetDeallocationFunc(s.record))
 		defer c.Close()
+
+		start := time.Now()
 		for i := 1; i < 10; i++ {
 			c.Set(i, true, time.Duration(i)*100*time.Millisecond)
 		}
 
 		synctest.Sleep(3 * time.Second)
 		for i := 1; i < 10; i++ {
-			if _, ok := c.Get(i); ok {
-				t.Fatalf("found key: %d", i)
-			}
+			s.expect(t, i, start.Add(time.Duration(i)*100*time.Millisecond))
 		}
 	})
 }
@@ -181,8 +235,11 @@ func TestReschedule(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		c := New[int, bool](SetDefaultTTL(100 * time.Millisecond))
+		var s sweeps[int, bool]
+		c := New[int, bool](SetDefaultTTL(100*time.Millisecond), SetDeallocationFunc(s.record))
 		defer c.Close()
+
+		start := time.Now()
 		for i := 1; i < 10; i++ {
 			c.Set(i, true, NoTTL)
 			c.Set(i, true, DefaultTTL)
@@ -190,9 +247,7 @@ func TestReschedule(t *testing.T) {
 
 		synctest.Sleep(1 * time.Second)
 		for i := 1; i < 10; i++ {
-			if _, ok := c.Get(i); ok {
-				t.Fatalf("found key: %d", i)
-			}
+			s.expect(t, i, start.Add(100*time.Millisecond))
 		}
 	})
 }
@@ -537,7 +592,11 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 	// takes the same write lock a Set holds while it nudges the wake channel.
 	// Enough concurrent writers starve the loop at that lock long enough for
 	// the channel to fill behind it.
-	c := New[int, int](SetDefaultTTL(2 * time.Millisecond))
+	var swept atomic.Int64
+	c := New[int, int](
+		SetDefaultTTL(2*time.Millisecond),
+		SetDeallocationFunc(func(int, int, DeallocationReason) { swept.Add(1) }),
+	)
 
 	const writers = 8
 	const perWriter = 25000
@@ -561,14 +620,16 @@ func TestSetDoesNotDeadlockOnFullWakeChannel(t *testing.T) {
 	select {
 	case <-done:
 		// A dropped nudge may delay collection, but every sweep re-derives the
-		// next wake-up from the whole map, so nothing is stranded.
+		// next wake-up from the whole map, so nothing is stranded. Counted at
+		// the callback: getkeys hides a corpse on its own and could not tell.
+		const total = writers * perWriter
 		deadline := time.Now().Add(30 * time.Second)
-		for len(c.getkeys()) > 0 && time.Now().Before(deadline) {
+		for swept.Load() < total && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		if n := len(c.getkeys()); n != 0 {
-			t.Fatalf("%d entries never expired after dropped wake-ups", n)
+		if n := swept.Load(); n != total {
+			t.Fatalf("%d of %d entries never expired after dropped wake-ups", total-n, total)
 		}
 
 		c.Close()

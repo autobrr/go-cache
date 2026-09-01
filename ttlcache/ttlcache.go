@@ -16,14 +16,16 @@ const NoTTL time.Duration = 0
 
 // DefaultTTL marks an item to be stored with the cache's configured default
 // TTL. It is negative so it cannot collide with a real duration; negative
-// TTLs are reserved as sentinels.
+// TTLs are reserved as sentinels. Any other negative TTL stores an entry that
+// has already expired: reads miss it, and the next sweep hands it to the
+// deallocation callback as timed out.
 const DefaultTTL time.Duration = -1
 
 type Cache[K comparable, V any] struct {
 	l              sync.RWMutex
 	o              Options
 	res            time.Duration // refresh batching granularity; see SetTimerResolution.
-	next           time.Time     // earliest deadline of any stored item; guarded by l. Stale-early after deletes, never late.
+	next           time.Time     // earliest deadline of any stored item; guarded by l. Stale-early after a delete, refresh, or later re-store; never late.
 	ch             chan struct{} // coalesced wake signal for the expiration loop; see wake.
 	done           chan struct{} // closed when the expiration loop returns; Close waits on it.
 	m              map[K]Item[V]
@@ -128,18 +130,10 @@ func (c *Cache[K, V]) GetOrSet(key K, value V, duration time.Duration) (V, bool)
 	return it.GetValue(), loaded
 }
 
-func (c *Cache[K, V]) fixupDuration(duration time.Duration) time.Duration {
-	if c.o.defaultTTL == NoTTL && duration == DefaultTTL {
-		return NoTTL
-	}
-
-	return duration
-}
-
 // GetOrSetItem is GetOrSet returning the full item; the bool again means the
 // key was already present.
 func (c *Cache[K, V]) GetOrSetItem(key K, value V, duration time.Duration) (Item[V], bool) {
-	return c.getOrSet(key, Item[V]{v: value, d: c.fixupDuration(duration)})
+	return c.getOrSet(key, Item[V]{v: value, d: duration})
 }
 
 func (c *Cache[K, V]) Set(key K, value V, duration time.Duration) bool {
@@ -148,7 +142,7 @@ func (c *Cache[K, V]) Set(key K, value V, duration time.Duration) bool {
 }
 
 func (c *Cache[K, V]) SetItem(key K, value V, duration time.Duration) Item[V] {
-	return c.set(key, Item[V]{v: value, d: c.fixupDuration(duration)})
+	return c.set(key, Item[V]{v: value, d: duration})
 }
 
 func (c *Cache[K, V]) Delete(key K) {
@@ -221,7 +215,8 @@ func (i *Item[V]) GetValue() V {
 }
 
 // SetTimerResolution sets how often a Get may push an item's expiration
-// forward. It defaults to half the default TTL.
+// forward. It defaults to half the default TTL, or to a second when no
+// default TTL is set.
 func SetTimerResolution(d time.Duration) Option {
 	return func(o *Options) {
 		o.defaultResolution = d
@@ -250,9 +245,11 @@ func DisableUpdateTime(val bool) Option {
 // the expiration goroutine, while a Set, GetOrSet, or Delete that collects an
 // entry invokes it on the caller, so invocations may run concurrently and f
 // must be safe for that. Re-storing a value that is already cached counts as
-// replacing it, and items still in the cache at Close are not deallocated.
-// A value whose deadline had already passed when it was removed is always
-// reported as timed out, however it left the cache.
+// replacing it. Close itself deallocates nothing: a sweep already due when it
+// is called may still run, and Close waits for it, but whatever is cached
+// once Close returns is never swept. A value whose deadline had already
+// passed when it was removed is always reported as timed out, however it
+// left the cache.
 //
 // K and V are inferred from f, so the call site never spells them out. Unlike
 // the other options this one cannot be checked at compile time: Options is not

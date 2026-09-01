@@ -46,11 +46,14 @@ func (c *Cache[K, V]) startExpirations() {
 // from. The deallocation callbacks run after the lock is released so they
 // may call back into the cache; see delete.
 func (c *Cache[K, V]) expire() {
-	t := time.Now()
 	var soon time.Time
 	var timedOut []deallocation[K, V]
 
 	c.l.Lock()
+	// read under the lock, like set: sampled while queued for it, an item
+	// whose deadline passes in the meantime survives as soon and costs an
+	// immediate second sweep.
+	t := time.Now()
 	for k, v := range c.m {
 		if v.t.IsZero() {
 			continue

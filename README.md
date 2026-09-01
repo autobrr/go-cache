@@ -55,7 +55,8 @@ Options:
 
 - `SetDefaultTTL(d)` sets the duration applied to items stored with `DefaultTTL`.
 - `SetTimerResolution(d)` sets how often a `Get` may push an item's expiration
-  forward. Defaults to half the default TTL.
+  forward. Defaults to half the default TTL, or to a second when no default
+  TTL is set.
 - `DisableUpdateTime(true)` stops a `Get` from extending the item's expiration.
 - `SetDeallocationFunc(f)` registers a callback for items leaving the cache,
   with the reason (`ReasonTimedOut`, `ReasonDeleted` or `ReasonReplaced`):
