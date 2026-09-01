@@ -4,22 +4,105 @@
 package ttlcache
 
 import (
+	"fmt"
+	"iter"
+	"slices"
+	"sync"
 	"time"
-
-	"github.com/autobrr/go-cache/timecache"
 )
 
-func New[K comparable, V any](options Options[K, V]) *Cache[K, V] {
-	c := Cache[K, V]{
-		o:  options,
-		ch: make(chan time.Time, 1000),
-		m:  make(map[K]Item[V]),
+// NoTTL stores an item that never expires.
+const NoTTL time.Duration = 0
+
+// DefaultTTL marks an item to be stored with the cache's configured default
+// TTL. It is negative so it cannot collide with a real duration; negative
+// TTLs are reserved as sentinels. Any other negative TTL stores an entry that
+// has already expired: reads miss it, and the next sweep hands it to the
+// deallocation callback as timed out.
+const DefaultTTL time.Duration = -1
+
+type Cache[K comparable, V any] struct {
+	l              sync.RWMutex
+	o              Options
+	res            time.Duration // refresh batching granularity; see SetTimerResolution.
+	next           time.Time     // earliest deadline of any stored item; guarded by l. Stale-early after a delete, refresh, or later re-store; never late.
+	ch             chan struct{} // coalesced wake signal for the expiration loop; see wake.
+	done           chan struct{} // closed when the expiration loop returns; Close waits on it.
+	m              map[K]Item[V]
+	deallocationFn DeallocationFunc[K, V]
+	closed         bool
+}
+
+// deallocation carries a removed entry out of the critical section so its
+// callback can run after the lock is released.
+type deallocation[K comparable, V any] struct {
+	key   K
+	value V
+}
+
+type Item[V any] struct {
+	t time.Time
+	d time.Duration
+	v V
+}
+
+// Options carries the settings an Option can reach. It is deliberately not
+// generic: that is what lets Option be a plain func(*Options), so options need
+// no type arguments at the call site. The price is that a deallocation func
+// has nowhere typed to live here, and is held as any until New binds it to the
+// cache's own K and V.
+type Options struct {
+	defaultTTL        time.Duration
+	defaultResolution time.Duration
+	noUpdateTime      bool
+	deallocationFunc  any // DeallocationFunc[K, V], bound in New.
+}
+
+// Option configures a Cache at construction. See SetDefaultTTL,
+// SetTimerResolution and DisableUpdateTime.
+type Option func(*Options)
+
+type DeallocationReason int
+
+const (
+	ReasonTimedOut = DeallocationReason(iota)
+	ReasonDeleted  = DeallocationReason(iota)
+	ReasonReplaced = DeallocationReason(iota)
+)
+
+type DeallocationFunc[K comparable, V any] func(key K, value V, reason DeallocationReason)
+
+func New[K comparable, V any](opts ...Option) *Cache[K, V] {
+	var options Options
+	for _, opt := range opts {
+		opt(&options)
 	}
 
-	if options.defaultTTL != NoTTL && options.defaultResolution == 0 {
-		c.tc = *timecache.New(timecache.Options{}.Round(options.defaultTTL / 2))
-	} else if options.defaultResolution != 0 {
-		c.tc = *timecache.New(timecache.Options{}.Round(options.defaultResolution))
+	c := Cache[K, V]{
+		o:    options,
+		ch:   make(chan struct{}, 1),
+		done: make(chan struct{}),
+		m:    make(map[K]Item[V]),
+	}
+
+	if options.deallocationFunc != nil {
+		f, ok := options.deallocationFunc.(DeallocationFunc[K, V])
+		if !ok {
+			panic(fmt.Sprintf("ttlcache: SetDeallocationFunc was given a %T, but this cache needs a %T",
+				options.deallocationFunc, DeallocationFunc[K, V](nil)))
+		}
+
+		c.deallocationFn = f
+	}
+
+	// an unset resolution follows the default TTL; without either, batch
+	// refreshes to a second.
+	c.res = options.defaultResolution
+	if c.res == 0 {
+		c.res = options.defaultTTL / 2
+	}
+	if c.res <= 0 {
+		c.res = time.Second
 	}
 
 	go c.startExpirations()
@@ -36,44 +119,21 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 }
 
 func (c *Cache[K, V]) GetItem(key K) (Item[V], bool) {
-	it, ok := c.get(key)
-	if !ok {
-		return it, ok
-	}
-
-	if !c.o.noUpdateTime && !it.t.IsZero() {
-		if _, t := c.getDuration(it.d); t.After(it.t) {
-			c.set(key, it)
-		}
-	}
-
-	return it, ok
+	return c.getRefresh(key)
 }
 
+// GetOrSet returns the value stored under key if present, or stores value
+// under it. The bool reports whether the key was already present, like
+// sync.Map.LoadOrStore. Unlike Get, a hit does not push the expiration.
 func (c *Cache[K, V]) GetOrSet(key K, value V, duration time.Duration) (V, bool) {
-	it, ok := c.GetOrSetItem(key, value, duration)
-	if !ok {
-		return *new(V), ok
-	}
-
-	return it.GetValue(), ok
+	it, loaded := c.GetOrSetItem(key, value, duration)
+	return it.GetValue(), loaded
 }
 
-func (c *Cache[K, V]) fixupDuration(duration time.Duration) time.Duration {
-	if c.o.defaultTTL == NoTTL && duration == DefaultTTL {
-		return NoTTL
-	}
-
-	return duration
-}
-
+// GetOrSetItem is GetOrSet returning the full item; the bool again means the
+// key was already present.
 func (c *Cache[K, V]) GetOrSetItem(key K, value V, duration time.Duration) (Item[V], bool) {
-	it, ok := c.getOrSet(key, Item[V]{v: value, d: c.fixupDuration(duration)})
-	if !ok {
-		return Item[V]{}, ok
-	}
-
-	return it, ok
+	return c.getOrSet(key, Item[V]{v: value, d: duration})
 }
 
 func (c *Cache[K, V]) Set(key K, value V, duration time.Duration) bool {
@@ -82,17 +142,62 @@ func (c *Cache[K, V]) Set(key K, value V, duration time.Duration) bool {
 }
 
 func (c *Cache[K, V]) SetItem(key K, value V, duration time.Duration) Item[V] {
-	return c.set(key, Item[V]{v: value, d: c.fixupDuration(duration)})
+	return c.set(key, Item[V]{v: value, d: duration})
 }
 
 func (c *Cache[K, V]) Delete(key K) {
 	c.delete(key, ReasonDeleted)
 }
 
+// GetKeys returns the keys as a slice the caller owns.
+//
+// Deprecated: use Keys.
 func (c *Cache[K, V]) GetKeys() []K {
 	return c.getkeys()
 }
 
+// Keys returns an iterator over the keys in the cache.
+//
+// The cache is not locked while the loop body runs, so the body may call back
+// into the cache -- the same reason deallocation callbacks run outside the
+// lock. The keys are a snapshot taken when Keys is called, so an entry may
+// leave the cache before the body reaches it.
+func (c *Cache[K, V]) Keys() iter.Seq[K] {
+	return slices.Values(c.getkeys())
+}
+
+// All returns an iterator over the key/value pairs in the cache. The keys are
+// a snapshot taken when All is called; each value is fetched as the body
+// reaches its key, so an entry that left the cache in between is skipped, and
+// a key deleted and stored again yields its current value, not the one from
+// snapshot time. An entry past its deadline counts as gone, like everywhere
+// else.
+//
+// Unlike Get, iterating does not push expirations forward: ranging over the
+// cache to inspect it would otherwise slide every item's TTL.
+func (c *Cache[K, V]) All() iter.Seq2[K, V] {
+	keys := c.getkeys() // eager, so the snapshot matches the doc and Keys.
+	return func(yield func(K, V) bool) {
+		for _, k := range keys {
+			it, ok := c.get(k) // c.get, not GetItem: observing must not refresh.
+			if !ok {
+				continue
+			}
+
+			if !yield(k, it.v) {
+				return
+			}
+		}
+	}
+}
+
+// Close stops the expiration goroutine and waits for it to return, including
+// any deallocation callback it is running, so resources the callback uses can
+// be torn down safely once Close returns. Close must not be called from any
+// deallocation callback: one receiving ReasonTimedOut cannot tell whether it
+// is on the expiration goroutine, where the wait would deadlock. Items stored
+// after Close are kept but never expire -- no sweeper is left to collect
+// them -- so writers and iterating bodies should be done before closing.
 func (c *Cache[K, V]) Close() {
 	c.close()
 }
@@ -109,22 +214,49 @@ func (i *Item[V]) GetValue() V {
 	return i.getValue()
 }
 
-func (o Options[K, V]) SetTimerResolution(d time.Duration) Options[K, V] {
-	o.defaultResolution = d
-	return o
+// SetTimerResolution sets how often a Get may push an item's expiration
+// forward. It defaults to half the default TTL, or to a second when no
+// default TTL is set.
+func SetTimerResolution(d time.Duration) Option {
+	return func(o *Options) {
+		o.defaultResolution = d
+	}
 }
 
-func (o Options[K, V]) SetDefaultTTL(d time.Duration) Options[K, V] {
-	o.defaultTTL = d
-	return o
+// SetDefaultTTL sets the duration applied to items stored with DefaultTTL.
+func SetDefaultTTL(d time.Duration) Option {
+	return func(o *Options) {
+		o.defaultTTL = d
+	}
 }
 
-func (o Options[K, V]) SetDeallocationFunc(f DeallocationFunc[K, V]) Options[K, V] {
-	o.deallocationFunc = f
-	return o
+// DisableUpdateTime stops a Get from extending the item's expiration.
+func DisableUpdateTime(val bool) Option {
+	return func(o *Options) {
+		o.noUpdateTime = val
+	}
 }
 
-func (o Options[K, V]) DisableUpdateTime(val bool) Options[K, V] {
-	o.noUpdateTime = val
-	return o
+// SetDeallocationFunc registers f to run whenever an item leaves the cache:
+// it timed out, was deleted, or was displaced by a Set storing a new value
+// under its key. f runs after the item is already gone and outside the
+// cache's lock, so it may call back into the cache -- except Close; see
+// there. It runs on whichever goroutine removed the item: sweeps invoke it on
+// the expiration goroutine, while a Set, GetOrSet, or Delete that collects an
+// entry invokes it on the caller, so invocations may run concurrently and f
+// must be safe for that. Re-storing a value that is already cached counts as
+// replacing it. Close itself deallocates nothing: a sweep already due when it
+// is called may still run, and Close waits for it, but whatever is cached
+// once Close returns is never swept. A value whose deadline had already
+// passed when it was removed is always reported as timed out, however it
+// left the cache.
+//
+// K and V are inferred from f, so the call site never spells them out. Unlike
+// the other options this one cannot be checked at compile time: Options is not
+// generic, so f travels as any and New binds it to the cache's own K and V.
+// A callback that disagrees with the cache panics there, at construction.
+func SetDeallocationFunc[K comparable, V any](f DeallocationFunc[K, V]) Option {
+	return func(o *Options) {
+		o.deallocationFunc = f
+	}
 }

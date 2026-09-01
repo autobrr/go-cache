@@ -14,13 +14,22 @@ type Cache struct {
 	o Options
 }
 
+// Options carries the settings an Option can reach.
 type Options struct {
 	round time.Duration
 }
 
-func New(o Options) *Cache {
+// Option configures a Cache at construction. See Round.
+type Option func(*Options)
+
+func New(opts ...Option) *Cache {
+	var options Options
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	c := Cache{
-		o: o,
+		o: options,
 	}
 
 	return &c
@@ -71,7 +80,11 @@ func (t *Cache) reset() {
 	t.t = time.Time{}
 }
 
-func (o Options) Round(d time.Duration) Options {
-	o.round = d
-	return o
+// Round sets the resolution Now is rounded to; the cached value lives for
+// half of it. Anything at or below a nanosecond, including unset, falls back
+// to a second.
+func Round(d time.Duration) Option {
+	return func(o *Options) {
+		o.round = d
+	}
 }
