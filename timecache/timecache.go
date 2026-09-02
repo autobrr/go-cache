@@ -4,14 +4,13 @@
 package timecache
 
 import (
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Cache struct {
-	m sync.RWMutex
-	t time.Time
-	o Options
+	t atomic.Pointer[time.Time]
+	d time.Duration
 }
 
 // Options carries the settings an Option can reach.
@@ -28,56 +27,38 @@ func New(opts ...Option) *Cache {
 		opt(&options)
 	}
 
-	c := Cache{
-		o: options,
+	d := options.round
+	if d <= time.Nanosecond {
+		d = time.Second
 	}
 
-	return &c
+	return &Cache{d: d}
 }
 
-func (t *Cache) Now() time.Time {
-	t.m.RLock()
-	if !t.t.IsZero() {
-		defer t.m.RUnlock()
-		return t.t
-	}
-
-	t.m.RUnlock()
-	return t.update()
-}
-
-func (t *Cache) update() time.Time {
-	t.m.Lock()
-	defer t.m.Unlock()
-	if !t.t.IsZero() {
-		return t.t
-	}
-
-	var d time.Duration
-	if t.o.round > time.Nanosecond {
-		d = t.o.round
-	} else {
-		d = time.Second * 1
-	}
-
-	t.t = time.Now().Round(d)
-
-	go func(duration time.Duration) {
-		if t.o.round > time.Nanosecond {
-			duration = t.o.round / 2
+func (c *Cache) Now() time.Time {
+	for {
+		if p := c.t.Load(); p != nil {
+			return *p
 		}
 
-		time.Sleep(duration)
-		t.reset()
-	}(d)
+		now := time.Now().Round(c.d)
+		p := &now
 
-	return t.t
+		if c.t.CompareAndSwap(nil, p) {
+			d := c.d
+			if d > time.Nanosecond {
+				d /= 2
+			}
+
+			go c.expire(p, d)
+			return now
+		}
+	}
 }
 
-func (t *Cache) reset() {
-	t.m.Lock()
-	defer t.m.Unlock()
-	t.t = time.Time{}
+func (c *Cache) expire(p *time.Time, d time.Duration) {
+	time.Sleep(d)
+	c.t.CompareAndSwap(p, nil)
 }
 
 // Round sets the resolution Now is rounded to; the cached value lives for
