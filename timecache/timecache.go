@@ -42,9 +42,7 @@ func (c *Cache) Now() time.Time {
 		}
 
 		now := time.Now().Round(c.d)
-		p := &now
-
-		if c.t.CompareAndSwap(nil, p) {
+		if p := &now; c.t.CompareAndSwap(nil, p) {
 			go c.expire(p, c.d)
 			return now
 		}
