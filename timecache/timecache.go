@@ -45,18 +45,17 @@ func (c *Cache) Now() time.Time {
 		p := &now
 
 		if c.t.CompareAndSwap(nil, p) {
-			d := c.d
-			if d > time.Nanosecond {
-				d /= 2
-			}
-
-			go c.expire(p, d)
+			go c.expire(p, c.d)
 			return now
 		}
 	}
 }
 
 func (c *Cache) expire(p *time.Time, d time.Duration) {
+	if d > time.Nanosecond {
+		d /= 2
+	}
+
 	time.Sleep(d)
 	c.t.CompareAndSwap(p, nil)
 }
